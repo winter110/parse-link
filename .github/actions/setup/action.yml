@@ -4,6 +4,9 @@ inputs:
   android:
     description: Install Java for Android builds.
     default: 'false'
+  java:
+    description: Install Java for native builds that link the JNI headers (package:jni).
+    default: 'false'
 runs:
   using: composite
   steps:
@@ -15,7 +18,7 @@ runs:
         go-version: '1.24.7'
         cache: false
     - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
-      if: inputs.android == 'true'
+      if: inputs.android == 'true' || inputs.java == 'true'
       with:
         distribution: temurin
         java-version: '21'

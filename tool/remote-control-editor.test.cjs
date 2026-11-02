@@ -8,7 +8,7 @@ const vm = require('node:vm');
 
 const root = resolve(__dirname, '..');
 const html = readFileSync(resolve(root, '远程配置编辑器.html'), 'utf8');
-const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout });
+const context = vm.createContext({ URL, TextEncoder, TextDecoder, AbortController, atob, btoa, setTimeout, clearTimeout });
 const script = html.match(/<script id="config-core">([\s\S]*?)<\/script>/)[1];
 vm.runInContext(script, context);
 const C = context.WenxiConfig;
@@ -453,13 +453,18 @@ test('the latest fetched publication replaces the reference regardless of revisi
 
 const reply = (body,status=200,url='https://example.test/config.json',headers={}) => {
   const response = new Response(body,{status,headers});
-  return {status,url,headers:response.headers,body:response.body};
+  return {status,url,headers:response.headers,body:response.body,json:() => response.json(),text:() => response.text()};
 };
+// DEFAULT_URL is a Gitee raw link, which fetchPublished reads through the
+// contents API, so the endpoint checks below use a plain HTTPS file instead.
+const PLAIN_URL = 'https://example.test/config.json';
+const giteeReply = (text,status=200) => reply(JSON.stringify({type:'file',encoding:'base64',
+  content:Buffer.from(text,'utf8').toString('base64')}),status);
 
 test('live checks read HTTPS without credentials, preserve UTF-8 and may inspect invalid sections', async () => {
   let options;
   const config = {schema:1,revision:33,about:{description:'中文介绍'},help:{enabled:true,url:'http://invalid'}};
-  const result = await C.fetchPublished('https://example.test/config.json',{fetcher:async (url,opts) => { options = opts; return reply(JSON.stringify(config)); }});
+  const result = await C.fetchPublished(PLAIN_URL,{fetcher:async (url,opts) => { options = opts; return reply(JSON.stringify(config)); }});
   assert.equal(result.revision,33);
   assert.equal(result.about.description,'中文介绍');
   issue(result,'help.url');
@@ -474,19 +479,32 @@ test('live checks fail explicitly on unsafe endpoints, status errors, timeouts a
     await assert.rejects(C.fetchPublished(url,{fetcher:async () => { calls++; return reply('{}'); }}));
   }
   assert.equal(calls,0);
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',500)}),/完整/);
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',200,'http://example.test/config')}),/HTTPS/);
-  await assert.rejects(C.fetchPublished('https://example.test/config.json',{fetcher:async () => reply('<html>failed</html>')}),/JSON/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => reply('{}',500)}),/完整/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => reply('{}',200,'http://example.test/config')}),/HTTPS/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => reply('<html>failed</html>')}),/JSON/);
   let aborted = false;
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{timeoutMs:15,fetcher:(_,opts) => { opts.signal.addEventListener('abort',() => { aborted = true; }); return new Promise(() => {}); }}),/超时/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{timeoutMs:15,fetcher:(_,opts) => { opts.signal.addEventListener('abort',() => { aborted = true; }); return new Promise(() => {}); }}),/超时/);
   assert.equal(aborted,true);
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => { throw new TypeError('CORS'); }}),/CORS/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => { throw new TypeError('CORS'); }}),/CORS/);
 });
 
 test('live checks bound declared and streamed body sizes and cancel incomplete streams', async () => {
-  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('{}',200,undefined,{'content-length':String(C.MAX_BYTES+1)})}),/256 KiB/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => reply('{}',200,undefined,{'content-length':String(C.MAX_BYTES+1)})}),/256 KiB/);
   let cancelled = false;
   const body = new ReadableStream({start(controller) { controller.enqueue(new Uint8Array(C.MAX_BYTES+1)); },cancel() { cancelled = true; }});
-  await assert.rejects(C.fetchPublished('https://example.test/config.json',{fetcher:async () => reply(body)}),/256 KiB/);
+  await assert.rejects(C.fetchPublished(PLAIN_URL,{fetcher:async () => reply(body)}),/256 KiB/);
   assert.equal(cancelled,true);
+});
+
+test('Gitee raw links are read through the contents API and report unusable payloads', async () => {
+  let requested;
+  const config = {schema:1,revision:41,about:{description:'中文介绍'}};
+  const result = await C.fetchPublished(C.DEFAULT_URL,{fetcher:async url => { requested = url; return giteeReply(JSON.stringify(config)); }});
+  assert.equal(requested,'https://gitee.com/api/v5/repos/dzys/cs/contents/config.json?ref=master');
+  assert.equal(result.revision,41);
+  assert.equal(result.about.description,'中文介绍');
+  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply(JSON.stringify({type:'dir'}))}),/Gitee/);
+  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => reply('<html>blocked</html>')}),/JSON/);
+  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => giteeReply('{}',500)}),/完整/);
+  await assert.rejects(C.fetchPublished(C.DEFAULT_URL,{fetcher:async () => giteeReply('x'.repeat(C.MAX_BYTES+1))}),/256 KiB/);
 });

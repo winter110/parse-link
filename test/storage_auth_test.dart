@@ -27,6 +27,15 @@ void main() {
     original[20] ^= 1;
     expect(() => CryptoBox.open(key, original), throwsA(isA<AppException>()));
   });
+  // test/flutter_test_config.dart lowers the cost for the suite; dropping the
+  // override must land back on the cost a shipped build writes.
+  test('clearing the test KDF override restores the production cost', () {
+    final overridden = CryptoBox.envelopeRounds;
+    expect(overridden, lessThan(CryptoBox.productionRounds));
+    addTearDown(() => CryptoBox.testingRounds = overridden);
+    CryptoBox.testingRounds = null;
+    expect(CryptoBox.envelopeRounds, CryptoBox.productionRounds);
+  });
   test(
     'Atomic encrypted state survives corrupt primary and a later interrupted update',
     () async {
@@ -256,8 +265,11 @@ void main() {
       expect(vault.credential(CloudPlatform.xunlei)!.primary, 'new');
     },
   );
+  // The fixture is a real 210000-round envelope, so this derivation keeps the
+  // production cost that the test-suite override lowers everywhere else.
   test(
     'Original JVM backups decrypt in Dart and cannot retain another 123 account token',
+    timeout: const Timeout(Duration(minutes: 3)),
     () async {
       final store = StateStore.memory({
         'secrets': {'pan123.access_token': 'wrong-old-account'},
@@ -285,8 +297,10 @@ void main() {
       expect(settings.threadOverrides['uc'], 128);
     },
   );
+  // Two more real 210000-round derivations against the same fixture.
   test(
     'Wrong backup passwords and tampered backups leave all existing state unchanged',
+    timeout: const Timeout(Duration(minutes: 3)),
     () async {
       final store = StateStore.memory({
         'settings': {'theme': 'Light'},

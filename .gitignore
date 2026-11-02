@@ -121,5 +121,6 @@ native/.tools/
 .env.*
 !.env.example
 __pycache__/
+.workbuddy/
 
 

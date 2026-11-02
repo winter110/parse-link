@@ -26,6 +26,16 @@ def stage(root, platform, installer=None):
         if not source.is_file() or destination.exists():
             raise ValueError('APK is missing or a staged asset already exists')
         shutil.copy2(source, destination)
+    elif platform == 'linux':
+        staged = root / '.local/linux'
+        for suffix in ('deb', 'layer'):
+            sources = sorted(p for p in staged.glob('asterlink_*.' + suffix) if p.is_file())
+            if len(sources) != 1:
+                raise ValueError('expected exactly one Linux {} artefact'.format(suffix))
+            destination = output / ('asterlink-' + version + '-linux-x64.' + suffix)
+            if destination.exists():
+                raise ValueError('A staged Linux asset already exists')
+            shutil.copy2(sources[0], destination)
     else:
         runtime = root / 'build/windows/x64/runner/Release'
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
@@ -57,7 +67,8 @@ def stage(root, platform, installer=None):
 
 def checksums(directory):
     directory = Path(directory)
-    files = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in {'.apk', '.exe', '.zip'})
+    files = sorted(p for p in directory.iterdir()
+                   if p.is_file() and p.suffix.lower() in {'.apk', '.exe', '.zip', '.deb', '.layer'})
     if not files:
         raise ValueError('No release assets were found')
     records = []
@@ -73,7 +84,7 @@ def checksums(directory):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--platform', choices=('android', 'windows'))
+    parser.add_argument('--platform', choices=('android', 'windows', 'linux'))
     parser.add_argument('--installer')
     parser.add_argument('--checksums', action='store_true')
     args = parser.parse_args()

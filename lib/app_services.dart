@@ -500,7 +500,10 @@ class AppServices extends ChangeNotifier {
       destination = cache;
       transport = AndroidGopeedTransport();
     } else {
-      require(Platform.isWindows, '当前版本支持 Android 和 Windows');
+      require(
+        Platform.isWindows || Platform.isLinux,
+        '当前版本支持 Android、Windows 和 Linux',
+      );
       data = Directory(
         p.join((await getApplicationSupportDirectory()).path, 'AsterLink'),
       );
@@ -516,7 +519,7 @@ class AppServices extends ChangeNotifier {
       transport = DesktopGopeedTransport(
         executable: p.join(
           p.dirname(Platform.resolvedExecutable),
-          'asterlink_gopeed.exe',
+          Platform.isWindows ? 'asterlink_gopeed.exe' : 'asterlink_gopeed',
         ),
       );
     }

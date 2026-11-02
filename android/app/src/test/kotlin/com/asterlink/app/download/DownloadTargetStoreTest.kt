@@ -94,10 +94,14 @@ class DownloadTargetStoreTest {
         val target = open(store)
         val lease = value(target, "lease")
         val file = provider.rows.getValue(value(target, "uri")).file
-        // Robolectric's descriptor number is not a filesystem path on this
-        // host. The real probe and I/O bridge must only use its granted FD.
+        // The locator must be the granted descriptor, never the provider's
+        // filesystem path. Do not assert that the locator is unopenable: on a
+        // host with procfs /proc/self/fd/<n> resolves to the granted handle,
+        // on Windows it names nothing, and the descriptor number itself is
+        // whatever Robolectric hands out. Comparing against the real path and
+        // the reads and writes below state the invariant on every host.
         assertTrue(value(target, "path").startsWith("/proc/self/fd/"))
-        assertFalse(File(value(target, "path")).exists())
+        assertNotEquals(file.absolutePath, value(target, "path"))
         assertEquals(4, store.access("task", lease, "write", offset = 2, data = byteArrayOf(3, 4, 5, 6)))
         assertEquals(2, store.access("task", lease, "write", offset = 0, data = byteArrayOf(1, 2)))
         assertEquals(6L, store.access("task", lease, "length"))

@@ -408,7 +408,7 @@ class LocalStateKey {
   Future<bool> canUnlock() => localFile(recoveryName).exists();
 
   Future<Uint8List> prepareRecovery(Uint8List key, String password) =>
-      compute(_wrapKey, (key, password));
+      compute(_wrapKey, (key, password, CryptoBox.envelopeRounds));
 
   Future<Uint8List> unlock(String password) async {
     final file = localFile(recoveryName);
@@ -430,10 +430,11 @@ class LocalStateKey {
 
 const _purpose = 'wenxi-local-state-key-v1';
 
-Uint8List _wrapKey((Uint8List, String) input) {
+Uint8List _wrapKey((Uint8List, String, int) input) {
   require(input.$2.length >= 6, '备份密码至少需要 6 位');
+  final rounds = input.$3;
   final salt = CryptoBox.random(16);
-  final wrappingKey = CryptoBox.derive(input.$2, salt, 210000);
+  final wrappingKey = CryptoBox.derive(input.$2, salt, rounds);
   final plain = Uint8List.fromList(
     utf8.encode(
       jsonEncode({'purpose': _purpose, 'key': base64Encode(input.$1)}),
@@ -445,7 +446,7 @@ Uint8List _wrapKey((Uint8List, String) input) {
         jsonEncode({
           'format': _purpose,
           'salt': base64Encode(salt),
-          'iterations': 210000,
+          'iterations': rounds,
           'data': base64Encode(CryptoBox.seal(wrappingKey, plain)),
         }),
       ),

@@ -297,6 +297,7 @@ void main() {
           'backgroundImages': {brokenId: base64Encode(broken)},
         },
         'background-test-password',
+        CryptoBox.envelopeRounds,
       ));
       await expectLater(
         BackupRepository(

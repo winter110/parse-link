@@ -420,8 +420,9 @@
             if (response.status !== 200 || (response.url && !https(response.url))) throw new Error('配置入口未返回完整的 HTTPS 文件。');
             if (Number(response.headers.get('content-length')) > MAX_BYTES) throw new Error('线上文件超过 256 KiB。');
             if (gitee) {
-              const payload = await response.json();
-              if (payload.type !== 'file' || typeof payload.content !== 'string') throw new Error('Gitee 内容接口未返回可读取的文件。');
+              let payload;
+              try { payload = await response.json(); } catch (error) { throw new Error(`Gitee 内容接口返回的不是有效 JSON，请确认仓库与文件已公开。\n${error.message}`); }
+              if (payload?.type !== 'file' || typeof payload.content !== 'string') throw new Error('Gitee 内容接口未返回可读取的文件。');
               const binary = atob(payload.content.replace(/\s/g,''));
               if (binary.length > MAX_BYTES) throw new Error('线上文件超过 256 KiB。');
               const bytes = Uint8Array.from(binary,c => c.charCodeAt(0));

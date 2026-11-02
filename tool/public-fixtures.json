@@ -27,7 +27,7 @@
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "tool/remote-control-editor.test.cjs": {
-    "sha256": "847e339af1fbfcba585bcf7d9709f50cd73d1e1469fc1e4be99d48f5d1c39c56",
+    "sha256": "bed7d24fa8e971e29cf071577269b1f3e1a71144cacef61c4e4f88b50b66ccf9",
     "reason": "Synthetic credential-bearing URLs on reserved example/test hosts exercise rejection of unsafe URLs."
   },
   "native/gopeed/bind/asterlink/parser_http_test.go": {

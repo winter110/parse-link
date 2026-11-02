@@ -18,9 +18,10 @@ const backupSecretKeys = {
   'xunlei.device_sign',
 };
 
-Uint8List encryptBackup((Json, String) input) {
+Uint8List encryptBackup((Json, String, int) input) {
+  final rounds = input.$3;
   final salt = CryptoBox.random(16);
-  final actualKey = CryptoBox.derive(input.$2, salt, 210000);
+  final actualKey = CryptoBox.derive(input.$2, salt, rounds);
   try {
     final packed = CryptoBox.seal(actualKey, utf8.encode(jsonEncode(input.$1)));
     return Uint8List.fromList(
@@ -28,7 +29,7 @@ Uint8List encryptBackup((Json, String) input) {
         const JsonEncoder.withIndent('  ').convert({
           'format': 'asterlink-backup-v1',
           'kdf': 'PBKDF2WithHmacSHA1',
-          'iterations': 210000,
+          'iterations': rounds,
           'salt': base64Encode(salt),
           'iv': base64Encode(packed.sublist(0, 12)),
           'data': base64Encode(packed.sublist(12)),
@@ -68,7 +69,7 @@ Json decryptBackup((Uint8List, String) input) {
   final key = CryptoBox.derive(
     input.$2,
     salt,
-    envelope.integer('iterations', 210000),
+    envelope.integer('iterations', CryptoBox.productionRounds),
   );
   try {
     Json payload;
@@ -166,6 +167,7 @@ class BackupRepository {
         ).name,
       },
       password,
+      CryptoBox.envelopeRounds,
     ));
     require(bytes.length <= 16 * 1024 * 1024, '备份文件过大，请取消携带背景图后重试');
     return bytes;

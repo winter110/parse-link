@@ -1,18 +1,23 @@
 name: CI
+# Runs on demand only: a push or a pull request no longer compiles or tests
+# anything. Start a run from Actions -> CI -> "Run workflow"; every run packages
+# the project and publishes the result as a brand new GitHub release.
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A run may be in the middle of publishing a release, so a second run must
+  # wait instead of cancelling it.
+  cancel-in-progress: false
 jobs:
   checks:
     uses: ./.github/workflows/checks.yml
+  # Windows keeps the Android APK build (tool/build-android.ps1 is PowerShell and
+  # writes Windows-style scratch paths) and the Windows package, but no longer
+  # runs the Android unit tests: those assert POSIX descriptor semantics and are
+  # executed by the `android-tests` job below.
   build:
     needs: checks
     runs-on: windows-2022
@@ -49,16 +54,375 @@ jobs:
           ./tool/build-android.ps1 -BuildConfig config/build.community.json -Unsigned
           python tool/verify_apk.py --apk build/app/outputs/flutter-apk/app-release.apk --sdk $env:ANDROID_HOME --unsigned --application-id com.asterlink.app.community --umeng-channel community --output .local/ci-apk-inspection.json
           if ($LASTEXITCODE -ne 0) { throw 'APK inspection failed.' }
-      - name: Test Android release code
+      - name: Save the gomobile AAR for the unit tests
+        # android/app/libs/gopeed-1.8.1.aar is gitignored and only
+        # native/build-gopeed.ps1 can produce it (gomobile plus the Windows tool
+        # paths), so the Android unit tests borrow the copy this build just made.
         if: matrix.target == 'android'
-        env:
-          ORG_GRADLE_PROJECT_ASTERLINK_UNSIGNED: 'true'
-          ORG_GRADLE_PROJECT_ASTERLINK_APPLICATION_ID: com.asterlink.app.community
-          ORG_GRADLE_PROJECT_UMENG_CHANNEL: community
-        run: |
-          $env:GRADLE_USER_HOME = Join-Path $env:GITHUB_WORKSPACE '.local/gradle-home'
-          & ./android/gradlew.bat -p android :app:testReleaseUnitTest -Ptarget-platform=android-arm64 --no-daemon
-          if ($LASTEXITCODE -ne 0) { throw 'Android unit tests failed.' }
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: gopeed-aar
+          path: android/app/libs/gopeed-1.8.1.aar
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
       - name: Build Windows from source
         if: matrix.target == 'windows'
         run: ./tool/build-windows.ps1 -BuildConfig config/build.community.json
+      # The build output is staged under predictable release asset names here so
+      # the publish job only has to merge the artefacts.
+      - name: Stage the release assets
+        run: |
+          python tool/package-release.py --platform ${{ matrix.target }}
+          if ($LASTEXITCODE -ne 0) { throw 'Staging the release assets failed.' }
+      - name: Save only release assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            .local/release-assets/*.apk
+            .local/release-assets/*.exe
+            .local/release-assets/*.zip
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+  # The unit tests drive DownloadTargetStore through real descriptors
+  # (pwrite/pread/ftruncate and /proc/self/fd), and Robolectric only implements
+  # those on Linux and macOS. On windows-2022 the nine descriptor cases of
+  # DownloadTargetStoreTest failed while the same code passed on Linux, so the
+  # suite runs here instead of being skipped.
+  android-tests:
+    needs: [checks, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PUB_HOSTED_URL: https://pub.dev
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+      GRADLE_USER_HOME: ${{ github.workspace }}/.local/gradle-home
+      ORG_GRADLE_PROJECT_ASTERLINK_UNSIGNED: 'true'
+      ORG_GRADLE_PROJECT_ASTERLINK_APPLICATION_ID: com.asterlink.app.community
+      ORG_GRADLE_PROJECT_UMENG_CHANNEL: community
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          android: 'true'
+      - name: Restore the gomobile AAR
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: gopeed-aar
+          path: android/app/libs
+      - name: Install pinned Android SDK components
+        # No NDK: the unit test task compiles Kotlin against android.jar and
+        # never invokes the native toolchain.
+        run: |
+          set -euo pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-36' 'build-tools;36.0.0'
+      - name: Point Gradle at the Flutter SDK and the Android SDK
+        # android/local.properties is gitignored and normally written by
+        # `flutter build`; this job calls Gradle directly, so write it here.
+        run: |
+          set -euo pipefail
+          flutter_bin="$(readlink -f "$(command -v flutter)")"
+          flutter_sdk="$(dirname "$(dirname "$flutter_bin")")"
+          printf 'flutter.sdk=%s\nsdk.dir=%s\n' "$flutter_sdk" "$ANDROID_HOME" > android/local.properties
+          cat android/local.properties
+      - name: Install the Gradle release the wrapper pins
+        # The wrapper script and jar are gitignored, so fetch the distribution
+        # named in gradle-wrapper.properties and verify it against the checksum
+        # recorded there rather than trusting a downloaded binary.
+        #
+        # services.gradle.org is only a CDN front end and has answered 500 on a
+        # runner while the same URL returned 200 elsewhere, so the download is
+        # retried and falls back to the distribution store, which serves the
+        # same bytes (the checksum below is what actually decides).
+        run: |
+          set -euo pipefail
+          properties=android/gradle/wrapper/gradle-wrapper.properties
+          version="$(sed -n 's/^distributionUrl=.*gradle-\([0-9.]*\)-bin\.zip.*$/\1/p' "$properties")"
+          checksum="$(sed -n 's/^distributionSha256Sum=//p' "$properties")"
+          test -n "$version" && test -n "$checksum"
+          archive="$RUNNER_TEMP/gradle-$version-bin.zip"
+          rm -f "$archive"
+
+          installed=''
+          for base in \
+            https://services.gradle.org/distributions \
+            https://downloads.gradle.org/distributions; do
+            echo "== gradle-$version-bin.zip from $base"
+            # --retry-all-errors covers resets and truncated transfers, which
+            # plain --retry does not treat as retryable.
+            if curl -fSL --retry 5 --retry-all-errors --retry-delay 3 \
+                --connect-timeout 20 --max-time 600 \
+                "$base/gradle-$version-bin.zip" -o "$archive" &&
+              echo "$checksum  $archive" | sha256sum -c -; then
+              installed=1
+              break
+            fi
+            rm -f "$archive"
+          done
+          if [ "$installed" != 1 ]; then
+            echo '::error::gradle-'"$version"'-bin.zip could not be downloaded from any mirror'
+            exit 1
+          fi
+
+          unzip -q "$archive" -d "$RUNNER_TEMP/gradle"
+          echo "$RUNNER_TEMP/gradle/gradle-$version/bin" >> "$GITHUB_PATH"
+      - name: Run the Android release unit tests
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+          gradle -p android :app:testReleaseUnitTest -Ptarget-platform=android-arm64 \
+            --no-daemon --console=plain
+      - name: Print the failing assertions
+        # The Gradle console only names the class, the method and a line number,
+        # which is not enough to tell a real regression from a host quirk. The
+        # JUnit XML has the assertion message, so print it into the log as well.
+        if: failure()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(android/app/build/test-results/testReleaseUnitTest/*.xml)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo 'no JUnit XML was produced, so the failure happened before the tests ran'
+            exit 0
+          fi
+          python3 - "${files[@]}" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+
+          for path in sys.argv[1:]:
+              for case in ET.parse(path).getroot().iter("testcase"):
+                  for node in list(case.findall("failure")) + list(case.findall("error")):
+                      print(f"FAILED {case.get('classname')} > {case.get('name')}")
+                      print((node.get("message") or "").strip())
+                      print((node.text or "").strip()[:4000])
+                      print("-" * 72)
+          PY
+      - name: Keep the test reports
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: android-unit-test-reports
+          path: |
+            android/app/build/reports/tests/testReleaseUnitTest
+            android/app/build/test-results/testReleaseUnitTest
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
+  # Produces the Debian package this project is installed with on Deepin 25.
+  # The runner and the dependency list match the `linux` job of release.yml so a
+  # CI build and a release build are the same artefact.
+  linux:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      PUB_HOSTED_URL: https://pub.dev
+      FLUTTER_STORAGE_BASE_URL: https://storage.googleapis.com
+      GOPROXY: https://proxy.golang.org,direct
+      GOTOOLCHAIN: go1.24.7
+      # Plugins still call a few deprecated GTK 3 entry points (they are only a
+      # warning, but the Flutter runner compiles with -Werror).
+      CFLAGS: -Wno-deprecated-declarations
+      CXXFLAGS: -Wno-deprecated-declarations
+      # Deepin 25 provides glibc 2.38 and libstdc++6 13.2 (GLIBCXX_3.4.32).
+      # A package that needs newer symbol versions installs fine and then
+      # refuses to start, so both floors are checked below. The runner is
+      # ubuntu-24.04 (glibc 2.39, libstdc++ 14), which is only safe as long as
+      # nothing actually references a 2.39-era symbol -- glibc keeps the old
+      # version tag for unchanged symbols, so this normally holds.
+      GLIBC_MAX: GLIBC_2.38
+      GLIBCXX_MAX: GLIBCXX_3.4.32
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          java: 'true'
+      - name: Install Linux build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config file binutils \
+            libgtk-3-dev libepoxy-dev libmpv-dev libsecret-1-dev \
+            libayatana-appindicator3-dev libjsoncpp-dev \
+            erofs-utils
+      - name: Build Linux release
+        # Invoked through bash on purpose: the checkout has lost the executable
+        # bit more than once (commits made from Windows do not carry file
+        # modes), and "./tool/build-linux.sh" then fails with "Permission
+        # denied" before the script ever runs.
+        run: bash tool/build-linux.sh
+      - name: Package the Debian package and the Linglong layer
+        # Both formats are built here, exactly like the `linux` job of
+        # release.yml: Deepin 25 users can install either the .deb or the
+        # .layer, so CI has to prove both get produced and verify clean.
+        run: |
+          set -euo pipefail
+          python3 tool/package_linux.py deb
+          python3 tool/package_linux.py layer
+          python3 tool/package_linux.py verify \
+            --deb "$(ls .local/linux/*.deb)" \
+            --layer "$(ls .local/linux/*.layer)"
+          dpkg-deb --field "$(ls .local/linux/*.deb)"
+      - name: Stage the release assets
+        run: python3 tool/package-release.py --platform linux
+      - name: Upload the Linux packages
+        # Uploaded before the compatibility gate so a package that cannot run on
+        # the target still reaches the run page for inspection.
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-linux
+          path: |
+            .local/release-assets/*.deb
+            .local/release-assets/*.layer
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Check the package against Deepin 25
+        run: |
+          set -euo pipefail
+          # Scratch space on the project disk: /tmp is a small tmpfs on some
+          # systems and the package is 27 MB unpacked.
+          work="$(mktemp -d .local/verify-XXXXXX)"
+          trap 'rm -rf "$work"' EXIT
+          dpkg-deb -x "$(ls .local/linux/*.deb)" "$work"
+          app="$work/opt/asterlink"
+
+          echo '== libraries the launcher resolves'
+          # ldd exits non-zero precisely when something is missing, so the
+          # status cannot decide anything here. The full list is a few hundred
+          # lines, so only the missing entries are printed.
+          resolved="$(ldd "$app/asterlink" || true)"
+          echo "$(printf '%s\n' "$resolved" | grep -c '=>' || true) shared libraries resolved"
+          if printf '%s\n' "$resolved" | grep -q 'not found'; then
+            printf '%s\n' "$resolved" | grep 'not found'
+            echo '::error::the Debian package needs libraries the build machine does not have'
+            exit 1
+          fi
+
+          # libdartjni.so only ships for Android builds and links libjvm, which is
+          # deliberately not a runtime dependency, so it is left out of the scan.
+          symbols="$(find "$app" -type f \
+              \( -name '*.so*' -o -name asterlink -o -name asterlink_gopeed \) \
+              -not -name 'libdartjni.so' -print0 |
+            xargs -0 -r objdump -T 2>/dev/null || true)"
+
+          highest() {
+            printf '%s\n' "$symbols" | grep -oE "$1" | sort -uV | tail -1 || true
+          }
+          within() {
+            local found="$1" limit="$2" label="$3"
+            echo "== highest $label required: ${found:-none} (target: $limit)"
+            if [ -n "$found" ] && [ "$(printf '%s\n%s\n' "$found" "$limit" | sort -V | tail -1)" != "$limit" ]; then
+              echo "::error::$label ${found} is above what Deepin 25 provides (${limit}); build the package on an older base (for example a debian:12 container) instead of ubuntu-24.04."
+              exit 1
+            fi
+          }
+          glibc="$(highest 'GLIBC_[0-9]+\.[0-9]+')"
+          glibcxx="$(highest 'GLIBCXX_[0-9.]+')"
+          within "$glibc" "$GLIBC_MAX" glibc
+          within "$glibcxx" "$GLIBCXX_MAX" GLIBCXX
+
+          deb="$(ls .local/linux/*.deb)"
+          layer="$(ls .local/linux/*.layer)"
+          {
+            echo '### Linux packages'
+            echo
+            echo "- deb: \`$(basename "$deb")\` ($(du -h "$deb" | cut -f1))"
+            echo "- linglong layer: \`$(basename "$layer")\` ($(du -h "$layer" | cut -f1))"
+            echo "- glibc symbol floor: \`${glibc:-none}\` (Deepin 25 has \`$GLIBC_MAX\`)"
+            echo "- GLIBCXX symbol floor: \`${glibcxx:-none}\` (Deepin 25 has \`$GLIBCXX_MAX\`)"
+            echo
+            echo '```'
+            dpkg-deb --field "$deb" Depends
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+  # Every run publishes its own release. The tag carries the run number (plus
+  # the attempt number when a run is retried), so a later build can never
+  # overwrite an earlier one even when the project version is unchanged.
+  # Releases are marked as pre-releases so a CI build never becomes "Latest".
+  publish:
+    needs: [build, android-tests, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      # Creating a release is the only write this workflow is allowed to make.
+      contents: write
+    env:
+      # github.token normally has contents: write here, granted by the job level
+      # permissions block above. A personal token is only needed when the
+      # repository (or the organisation above it) keeps the default workflow
+      # permissions read-only, which caps what a workflow may request; store a
+      # fine grained token with "Contents: Read and write" as RELEASE_TOKEN to
+      # take that path.
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+      # gh would otherwise infer the repository from the git remote, which is
+      # checked out without credentials here.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Collect the release assets
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: release-*
+          path: .local/release-assets
+          merge-multiple: true
+      - name: Report what this token may write
+        # "Resource not accessible by integration" from the release call means
+        # the token that reached gh only had contents: read. Printing what the
+        # token actually got keeps that diagnosis inside the log instead of
+        # sending the reader to the repository settings to guess.
+        run: |
+          set -euo pipefail
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GH_REPO" | python3 -c '
+          import json, sys
+
+          payload = json.load(sys.stdin)
+          permissions = payload.get("permissions")
+          if not isinstance(permissions, dict):
+              print("could not read the token permissions:", payload.get("message", "unexpected reply"))
+              sys.exit(0)
+          print("token permissions on the repository:", json.dumps(permissions, sort_keys=True))
+          print("can write repository contents:", "yes" if permissions.get("push") else "no")
+          if not permissions.get("push"):
+              print("::warning title=contents write is missing::this token only has read access, so creating the release will fail with HTTP 403. Set Settings then Actions then General then Workflow permissions to \"Read and write permissions\", or store a token with contents: write as the RELEASE_TOKEN secret. A re-run keeps the permissions of the original run, so start a new run afterwards.")
+          '
+      - name: Publish a new release
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version: *//p' pubspec.yaml)"
+          tag="ci-${version//+/-}-${GITHUB_RUN_NUMBER}"
+          if [ "${GITHUB_RUN_ATTEMPT:-1}" -gt 1 ]; then
+            tag="${tag}-attempt-${GITHUB_RUN_ATTEMPT}"
+          fi
+
+          python3 tool/package-release.py --checksums
+          ls -lh .local/release-assets
+
+          # No --clobber anywhere: if the tag somehow already exists the command
+          # fails instead of replacing the assets of an earlier build.
+          if ! gh release create "$tag" \
+              --target "$GITHUB_SHA" \
+              --title "构建 ${version}（运行 ${GITHUB_RUN_NUMBER}）" \
+              --notes "由手动触发的 Actions 运行 [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) 生成，版本 ${version}，提交 ${GITHUB_SHA:0:7}。" \
+              --prerelease \
+              .local/release-assets/*; then
+            echo '::error title=release not created::HTTP 403 "Resource not accessible by integration" means the token had read only contents, see the permission report above; "tag_name already exists" means an earlier run already published this tag, which is expected when a successful run is re-run.'
+            exit 1
+          fi
+
+          echo "::notice::published release $tag with $(ls .local/release-assets | wc -l) assets"

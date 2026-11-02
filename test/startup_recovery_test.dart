@@ -140,6 +140,7 @@ void main() {
           'activeCloudAccounts': {},
         },
         'fixture-password',
+        CryptoBox.envelopeRounds,
       ));
       await expectLater(
         StartupRecovery(failure).restore(bad, 'fixture-password'),

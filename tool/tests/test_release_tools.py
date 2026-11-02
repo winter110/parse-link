@@ -23,6 +23,8 @@ def load(name, filename):
 public = load('public_files', 'check_public_files.py')
 release = load('release_assets', 'package-release.py')
 settings = load('release_settings', 'prepare-ci-release.py')
+defines = load('release_defines', 'release_defines.py')
+layer_pack = load('layer_pack', 'linglong/pack_layer.py')
 
 BACKEND_ONLY_PATHS = [
     'backend/src/Routes.php', 'wwwroot/5.com/src/Sources.php',
@@ -296,6 +298,120 @@ class VersionTest(unittest.TestCase):
             self.assertNotEqual(run('--check', '--tag', 'v1.2.3+3').returncode, 0)
             pubspec.write_text('version: 1.2.3+5\n', encoding='utf-8')
             self.assertNotEqual(run('--check').returncode, 0)
+
+
+class LinuxReleaseTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        (self.root / 'pubspec.yaml').write_text('version: 1.2.3+4\n', encoding='utf-8')
+        self.staged = self.root / '.local/linux'
+        self.staged.mkdir(parents=True)
+
+    def test_both_linux_packages_are_staged_under_one_version(self):
+        (self.staged / 'asterlink_1.2.3+4_amd64.deb').write_bytes(b'deb')
+        (self.staged / 'asterlink_1.2.3.4_x86_64_binary.layer').write_bytes(b'layer')
+        output = release.stage(self.root, 'linux')
+        self.assertEqual(release.checksums(output), 2)
+        self.assertEqual(sorted(path.name for path in output.iterdir()), [
+            'SHA256SUMS.txt',
+            'asterlink-1.2.3+4-linux-x64.deb',
+            'asterlink-1.2.3+4-linux-x64.layer',
+        ])
+        self.assertEqual((output / 'asterlink-1.2.3+4-linux-x64.deb').read_bytes(), b'deb')
+
+    def test_a_missing_linux_package_is_rejected(self):
+        (self.staged / 'asterlink_1.2.3+4_amd64.deb').write_bytes(b'deb')
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'linux')
+
+    def test_duplicate_linux_packages_are_rejected(self):
+        for name in ('asterlink_1.2.3+4_amd64.deb', 'asterlink_1.2.3+9_amd64.deb'):
+            (self.staged / name).write_bytes(b'deb')
+        (self.staged / 'asterlink_1.2.3.4_x86_64_binary.layer').write_bytes(b'layer')
+        with self.assertRaises(ValueError):
+            release.stage(self.root, 'linux')
+
+
+class ReleaseDefinesTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+
+    def config(self, **overrides):
+        values = {
+            'controlEnabled': True,
+            'controlUrl': 'https://control.example.com/config.json',
+            'githubRepository': 'example/project',
+            'applicationId': 'com.example.app',
+            'metricsAppKey': '',
+            'metricsChannel': 'github',
+        }
+        values.update(overrides)
+        path = self.root / 'build-config.json'
+        path.write_text(json.dumps(values), encoding='utf-8')
+        return path
+
+    def test_announcements_url_follows_the_control_url(self):
+        arguments = list(defines.arguments(defines.load(self.config())))
+        self.assertIn('--dart-define=ASTERLINK_CONTROL_ENABLED=true', arguments)
+        self.assertIn('--dart-define=ASTERLINK_ANNOUNCEMENTS_URL='
+                      'https://control.example.com/announcements.json', arguments)
+
+    def test_disabled_control_needs_no_url(self):
+        loaded = defines.load(self.config(controlEnabled=False, controlUrl=''))
+        arguments = list(defines.arguments(loaded))
+        self.assertIn('--dart-define=ASTERLINK_CONTROL_ENABLED=false', arguments)
+        self.assertIn('--dart-define=ASTERLINK_CONTROL_URL=', arguments)
+
+    def test_insecure_or_malformed_values_are_rejected(self):
+        for overrides in ({'controlUrl': 'http://control.example.com/config.json'},
+                          {'applicationId': 'invalid'},
+                          {'githubRepository': 'not a repository'},
+                          {'metricsChannel': 'has space'},
+                          {'metricsAppKey': 'short'}):
+            with self.subTest(**overrides), self.assertRaises(ValueError):
+                defines.load(self.config(**overrides))
+
+
+class LayerMetaTest(unittest.TestCase):
+    def test_meta_wraps_info_in_a_versioned_document(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        layer = Path(directory.name)
+        info = {
+            'arch': ['x86_64'], 'base': 'org.deepin.base/25.2.2', 'channel': 'main',
+            'command': ['/opt/apps/com.example.app/files/bin/app'], 'id': 'com.example.app',
+            'kind': 'app', 'module': 'binary', 'name': 'Example',
+            'schema_version': '1.0', 'size': 1, 'version': '1.0.0.0',
+        }
+        (layer / 'info.json').write_text(json.dumps(info), encoding='utf-8')
+        meta = json.loads(layer_pack.meta_bytes(str(layer)).decode('utf-8'))
+        # The package manager reads LayerInfo{version, info}; a flattened
+        # info.json leaves LayerInfo::info null and installation fails.
+        self.assertEqual(meta['version'], '1')
+        self.assertEqual(meta['info']['id'], 'com.example.app')
+
+    @unittest.skipUnless(shutil.which('mkfs.erofs') and shutil.which('fsck.erofs'),
+                         'erofs-utils is required for the layer round trip')
+    def test_layer_round_trip_keeps_the_entry_point(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        layer = Path(directory.name) / 'layer'
+        (layer / 'files/bin').mkdir(parents=True)
+        (layer / 'files/bin/app').write_bytes(b'#!/bin/sh\nexit 0\n')
+        info = {
+            'arch': ['x86_64'], 'base': 'org.deepin.base/25.2.2', 'channel': 'main',
+            'command': ['/opt/apps/com.example.app/files/bin/app'], 'id': 'com.example.app',
+            'kind': 'app', 'module': 'binary', 'name': 'Example',
+            'schema_version': '1.0', 'size': 1, 'version': '1.0.0.0',
+        }
+        (layer / 'info.json').write_text(json.dumps(info), encoding='utf-8')
+        output = str(Path(directory.name) / 'example.layer')
+        layer_pack.build(str(layer), output)
+        self.assertEqual(layer_pack.verify(output)['id'], 'com.example.app')
 
 
 if __name__ == '__main__':
