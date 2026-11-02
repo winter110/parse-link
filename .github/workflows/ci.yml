@@ -2,6 +2,7 @@ name: CI
 # Runs on demand only: a push or a pull request no longer compiles or tests
 # anything. Start a run from Actions -> CI -> "Run workflow"; every run packages
 # the project and publishes the result as a brand new GitHub release.
+# Commit directly to develop
 on:
   workflow_dispatch:
 permissions:
