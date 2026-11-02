@@ -132,7 +132,11 @@ void main() {
           await tester.runAsync(() async {
             final image = await render.toImage(pixelRatio: 1);
             final data = await image.toByteData(format: ui.ImageByteFormat.png);
-            final path = File('${directory.path}/app-verification-$name.png');
+            // Debug screenshot only; keep it inside the ignored .local tree so
+            // the test never depends on a path from one developer's machine.
+            final path = File(
+              '.local/reports/search-security/app-verification-$name.png',
+            )..parent.createSync(recursive: true);
             await path.writeAsBytes(data!.buffer.asUint8List());
             image.dispose();
           });

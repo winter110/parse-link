@@ -2,10 +2,14 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import '../core/json.dart';
 
-bool get isDesktopPlatform => Platform.isWindows || Platform.isMacOS;
+bool get isDesktopPlatform =>
+    Platform.isWindows || Platform.isMacOS || Platform.isLinux;
 
 String desktopDownloadExecutable(String executable, String platform) {
-  require({'windows', 'macos'}.contains(platform), '当前系统不支持桌面下载组件');
+  require(
+    {'windows', 'macos', 'linux'}.contains(platform),
+    '当前系统不支持桌面下载组件',
+  );
   final paths = platform == 'windows' ? p.windows : p.posix;
   return paths.join(
     paths.dirname(executable),

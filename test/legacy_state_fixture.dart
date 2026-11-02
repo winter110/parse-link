@@ -155,7 +155,9 @@ class LegacyBackupFixture extends BackupRepository {
       '',
       includeBackgroundImages: includeBackgroundImages,
     );
-    return encryptBackup((decryptBackup((plain, '')), password));
+    return encryptBackup(
+      (decryptBackup((plain, '')), password, CryptoBox.envelopeRounds),
+    );
   }
 
   @override

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:asterlink/core/crypto_box.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/data/backup.dart';
 import 'package:asterlink/data/cleanup_outbox.dart';
@@ -164,7 +165,11 @@ void main() {
         'cloudAccounts': [false],
         'activeCloudAccounts': <String, String>{},
       };
-      final encrypted = encryptBackup((payload, 'fixture-password'));
+      final encrypted = encryptBackup((
+        payload,
+        'fixture-password',
+        CryptoBox.envelopeRounds,
+      ));
       await expectLater(
         BackupRepository(store).restore(encrypted, 'fixture-password'),
         throwsA(isA<AppException>()),

@@ -41,6 +41,7 @@ void main() {
     backup = encryptBackup((
       decryptBackup((await BackupRepository(source).create(''), '')),
       'fixture-password',
+      CryptoBox.envelopeRounds,
     ));
     source.dispose();
   });
@@ -135,6 +136,7 @@ void main() {
           'activeCloudAccounts': {},
         },
         'fixture-password',
+        CryptoBox.envelopeRounds,
       ));
       await expectLater(
         recovery().restore(bad, 'fixture-password'),

@@ -1,10 +1,36 @@
 import 'dart:convert';
 import 'dart:math';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:pointycastle/export.dart';
 import 'json.dart';
 
 class CryptoBox {
+  /// PBKDF2 cost (in rounds) of every envelope this build writes: backups and
+  /// the local password-recovery file. It is stored next to the salt, so
+  /// readers always use the cost they find in the file.
+  static const int productionRounds = 210000;
+
+  /// Test-suite override for [envelopeRounds]. Reading it only inside an
+  /// `assert` keeps release builds at [productionRounds]: the assert body is
+  /// stripped, so this field can never lower the cost of a shipped build.
+  ///
+  /// The value cannot live in a static alone - `compute` starts a fresh
+  /// isolate with empty statics - so callers read [envelopeRounds] in the
+  /// calling isolate and hand it to the worker as part of the message.
+  static int? _testingRounds;
+
+  @visibleForTesting
+  static set testingRounds(int? value) => _testingRounds = value;
+
+  static int get envelopeRounds {
+    var value = productionRounds;
+    assert(() {
+      value = _testingRounds ?? productionRounds;
+      return true;
+    }());
+    return value;
+  }
+
   static Uint8List random(int length) {
     final rng = Random.secure();
     return Uint8List.fromList(List.generate(length, (_) => rng.nextInt(256)));
@@ -40,9 +66,14 @@ class CryptoBox {
     }
   }
 
+  /// Derives a key with the round count recorded in the envelope it will be
+  /// used for. The bounds only reject values that cannot work at all: writers
+  /// always pass [envelopeRounds], while readers must accept whatever an older
+  /// build (or a fixture) wrote, and a hostile high count is a denial of
+  /// service rather than a shortcut.
   static Uint8List derive(String password, Uint8List salt, int rounds) {
     require(
-      rounds >= 100000 &&
+      rounds >= 1 &&
           rounds <= 2000000 &&
           salt.length >= 16 &&
           salt.length <= 64,

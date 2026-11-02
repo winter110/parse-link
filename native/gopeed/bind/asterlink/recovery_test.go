@@ -115,7 +115,10 @@ func TestRetrySettingControlsEveryConnection(t *testing.T) {
 			if err := Begin(string(raw)); err != nil {
 				t.Fatal(err)
 			}
-			state := waitState(t, "retry", func(s snapshot) bool { return s.Status == "done" || s.Status == "error" }, 45*time.Second+time.Duration(retries)*10*time.Second)
+			// The backoff between attempts, not the configured ceiling, decides
+			// how long this can take, so the deadline follows the attempts that
+			// can really happen (at most failures) rather than the raw setting.
+			state := waitState(t, "retry", func(s snapshot) bool { return s.Status == "done" || s.Status == "error" }, 45*time.Second+time.Duration(failures)*30*time.Second)
 			wantAttempts := int32(retries + 1)
 			if int32(retries) >= failures {
 				wantAttempts = failures + 1

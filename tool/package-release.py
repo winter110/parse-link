@@ -16,8 +16,13 @@ def version_of(root):
 
 
 def stage(root, platform, installer=None, architecture='x64'):
-    if platform not in {'android', 'windows'} or architecture not in {'x64', 'arm64'}:
+    # The Linux package is built on the x64 ubuntu runner only, so it keeps the
+    # default architecture; the guard exists to reject a mistyped --platform
+    # before anything is copied into .local/release-assets.
+    if platform not in {'android', 'windows', 'linux'} or architecture not in {'x64', 'arm64'}:
         raise ValueError('Unsupported release platform or architecture')
+    if platform == 'linux' and architecture != 'x64':
+        raise ValueError('The Linux package is staged for x64 only')
     root = Path(root).resolve()
     version = version_of(root)
     output = root / '.local/release-assets'
@@ -28,6 +33,16 @@ def stage(root, platform, installer=None, architecture='x64'):
         if not source.is_file() or destination.exists():
             raise ValueError('APK is missing or a staged asset already exists')
         shutil.copy2(source, destination)
+    elif platform == 'linux':
+        staged = root / '.local/linux'
+        for suffix in ('deb', 'layer'):
+            sources = sorted(p for p in staged.glob('asterlink_*.' + suffix) if p.is_file())
+            if len(sources) != 1:
+                raise ValueError('expected exactly one Linux {} artefact'.format(suffix))
+            destination = output / ('asterlink-' + version + '-linux-x64.' + suffix)
+            if destination.exists():
+                raise ValueError('A staged Linux asset already exists')
+            shutil.copy2(sources[0], destination)
     else:
         runtime = root / ('build/windows/' + architecture + '/runner/Release')
         for name in ('asterlink.exe', 'asterlink_gopeed.exe', 'flutter_windows.dll', 'libmpv-2.dll', 'data/app.so'):
@@ -69,7 +84,8 @@ def stage(root, platform, installer=None, architecture='x64'):
 
 def checksums(directory):
     directory = Path(directory)
-    files = sorted(p for p in directory.iterdir() if p.is_file() and p.suffix.lower() in {'.apk', '.exe', '.zip'})
+    files = sorted(p for p in directory.iterdir()
+                   if p.is_file() and p.suffix.lower() in {'.apk', '.exe', '.zip', '.deb', '.layer'})
     if not files:
         raise ValueError('No release assets were found')
     records = []
@@ -85,7 +101,7 @@ def checksums(directory):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--platform', choices=('android', 'windows'))
+    parser.add_argument('--platform', choices=('android', 'windows', 'linux'))
     parser.add_argument('--installer')
     parser.add_argument('--architecture', choices=('x64', 'arm64'), default='x64')
     parser.add_argument('--checksums', action='store_true')
