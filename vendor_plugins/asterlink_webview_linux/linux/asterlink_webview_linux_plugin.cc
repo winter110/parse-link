@@ -9,7 +9,7 @@
 // Everything links against the WebKitGTK 4.1 ABI the distribution ships
 // (libwebkit2gtk-4.1-0); no part of WebKit is built from source here.
 
-#include "include/asterlink_webview_linux/asterlink_webview_linux_plugin.h"
+#include <asterlink_webview_linux/asterlink_webview_linux_plugin.h>
 
 #include <gtk/gtk.h>
 #include <webkit2/webkit2.h>
