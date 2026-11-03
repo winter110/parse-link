@@ -13,6 +13,17 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBKIT2GTK REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
 pkg_check_modules(JSCOREGTK REQUIRED IMPORTED_TARGET javascriptcoregtk-4.1)
 
+# The runner project already imports GTK before adding plugin subdirectories,
+# and pkg_check_modules errors out when the imported target exists. The guard
+# keeps this file usable both standalone and as a child of the runner.
+if(NOT TARGET PkgConfig::GTK)
+  pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+endif()
+
+# The implementation sits next to this file, matching the upstream plugin
+# layout. Flutter links the whole plugin directory in as
+# flutter/ephemeral/.plugin_symlinks/<name>/, so the sibling include/ directory
+# below resolves in CI as well.
 add_library(${PLUGIN_NAME} SHARED
   "asterlink_webview_linux_plugin.cc"
 )
@@ -23,10 +34,13 @@ add_library(${PLUGIN_NAME} SHARED
 target_compile_features(${PLUGIN_NAME} PRIVATE cxx_std_17)
 target_compile_options(${PLUGIN_NAME} PRIVATE -Wall -Wno-deprecated-declarations)
 target_compile_definitions(${PLUGIN_NAME} PRIVATE FLUTTER_PLUGIN_IMPL)
+
+# The public header lives in <plugin>/include/, one level above this directory.
+set(PLUGIN_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../include")
 target_include_directories(${PLUGIN_NAME} INTERFACE
-  "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  "${PLUGIN_INCLUDE_DIR}")
 target_include_directories(${PLUGIN_NAME} PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}")
+  "${PLUGIN_INCLUDE_DIR}")
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)

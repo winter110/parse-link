@@ -67,6 +67,50 @@ libwebkit2gtk-4.1-0  libjavascriptcoregtk-4.1-0  libsoup-3.0-0
   要支持得再把 helper 进程目录一起收进组合层，或让玲珑版明确只用手动登录。
 * **在线预览 / 搜索安全验证**这两处仍需要内嵌浏览器，Linux 上改成提示文案（改为下载文件 / 换平台完成）。
 
+## 插件目录布局（别改动）
+
+```
+vendor_plugins/asterlink_webview_linux/
+├── pubspec.yaml            # pluginClass: AsterlinkWebviewLinuxPlugin
+├── include/asterlink_webview_linux/*.h   # 公开头，注册入口
+├── lib/asterlink_webview_linux.dart      # MethodChannel / EventChannel 客户端
+└── linux/
+    ├── CMakeLists.txt
+    └── asterlink_webview_linux_plugin.cc # 实现必须在这里
+```
+
+`linux/CMakeLists.txt` 里的相对源文件路径是按 **CMakeLists.txt 所在目录** 解析的，
+而 Flutter 生成的 `generated_plugins.cmake` 加的是 `<plugin>/linux` 这个子目录。
+实现文件放在插件根目录就会在 CI 报 `Cannot find source file`（2026-11-03 实际踩过），
+所以 `.cc` 固定放在 `linux/` 下，头文件通过 `${CMAKE_CURRENT_SOURCE_DIR}/../include` 引用。
+
+## 本地编译自检（不装系统包、不需要 sudo）
+
+CI 上跑一轮 `linux` job 要十几分钟，而这类错误（源文件路径、头文件签名、符号名）
+本地就能提前抓出来。做法是把发行版的 `-dev` 包**解包到普通目录**当 sysroot 用，
+不安装、不编译任何依赖：
+
+```bash
+mkdir -p ~/hdrcheck && cd ~/hdrcheck
+apt-get download libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev libgio-2.0-dev
+mkdir -p root && for d in *.deb; do dpkg-deb -x "$d" root; done
+
+R=~/hdrcheck/root/usr
+g++ -fsyntax-only -std=c++17 -Wall \
+  -I$R/include/gtk-3.0 -I$R/include/glib-2.0 -I$R/lib/x86_64-linux-gnu/glib-2.0/include \
+  -I$R/include/pango-1.0 -I$R/include/harfbuzz -I$R/include/cairo \
+  -I$R/include/gdk-pixbuf-2.0 -I$R/include/atk-1.0 -I$R/include/fribidi \
+  -I$R/include/webkitgtk-4.1 -I$R/include/libsoup-3.0 -I$R/include/epoxy \
+  -Ivendor_plugins/asterlink_webview_linux/include -Ilinux/flutter/ephemeral \
+  vendor_plugins/asterlink_webview_linux/linux/asterlink_webview_linux_plugin.cc
+```
+
+`-fsyntax-only` 只查头文件与函数签名；再想验证链接，可以编成 `.o` 后
+`nm -u` 对照 `libwebkit2gtk-4.1.so.0` / `libjavascriptcoregtk-4.1.so.0` /
+`libsoup-3.0.so.0` 的导出符号，确认没有写错名字。
+真正走一遍 CMake（含 `pkg_check_modules` 与相对路径解析）的话，造一个只 `add_subdirectory`
+插件目录、并伪造 `flutter` imported target 的小工程即可（见 2026-11-03 的验证记录）。
+
 ## 手动验证（在桌面会话里跑）
 
 ```bash
