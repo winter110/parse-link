@@ -2570,9 +2570,16 @@ class DownloadManager extends ChangeNotifier {
       } finally {
         _releasePost();
       }
-      // Completed state is durable before releasing the post-processing slot.
-      // Cleanup remains awaited for safe shutdown, but cannot block the next hash.
-      await _afterCompleted(id, completedSpec);
+      // Publication is durable at this point. Cleanup deletes the payload cache
+      // — a full-size file — and waits on playback releases, so it must not
+      // keep the single post turn: the next finished task would sit idle for
+      // ten-plus seconds before its own save started.
+      try {
+        await _afterCompleted(id, completedSpec);
+      } catch (_) {
+        // The file is already published; a failed cleanup must not be reported
+        // as a failed transfer.
+      }
     } catch (e, stack) {
       if (!run.stopped && e is! _Stopped) {
         DiagnosticLog.error(
