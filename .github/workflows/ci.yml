@@ -255,6 +255,7 @@ jobs:
             clang cmake ninja-build pkg-config file binutils \
             libgtk-3-dev libepoxy-dev libmpv-dev libsecret-1-dev \
             libayatana-appindicator3-dev libjsoncpp-dev \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
             erofs-utils
       - name: Build Linux release
         # Invoked through bash on purpose: the checkout has lost the executable

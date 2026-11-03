@@ -1,0 +1,21 @@
+name: asterlink_webview_linux
+description: >-
+  Linux web login browser for 文析助手. Hosts a WebKitGTK 4.1 web view in a
+  native GTK window so the login flow can drive it from Dart over a method
+  channel.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.10.0
+  flutter: ">=3.38.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      linux:
+        pluginClass: AsterlinkWebviewLinuxPlugin

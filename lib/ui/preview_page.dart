@@ -14,6 +14,7 @@ import '../preview/text_document.dart';
 import '../preview/text_preview_loader.dart';
 import '../playback/playback_controller.dart';
 import '../playback/playback_sources.dart';
+import '../platform/login_browser.dart';
 import 'common.dart';
 import 'baidu_download_prompt.dart';
 import 'operation_progress_view.dart';
@@ -467,6 +468,18 @@ class _PreviewPageState extends State<PreviewPage> {
         }
         if (snapshot.connectionState != ConnectionState.done) {
           return const Center(child: CircularProgressIndicator());
+        }
+        if (loginBrowserIsDetached) {
+          return EmptyPanel(
+            '在线预览需要内嵌浏览器',
+            'Linux 版没有内嵌浏览器，请下载文件后查看',
+            icon: CupertinoIcons.globe,
+            action: FilledButton.icon(
+              onPressed: adding ? null : _download,
+              icon: const Icon(CupertinoIcons.arrow_down, size: 17),
+              label: const Text('下载文件'),
+            ),
+          );
         }
         return InAppWebView(
           key: const Key('online-preview-webview'),

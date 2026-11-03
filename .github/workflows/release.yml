@@ -176,6 +176,7 @@ jobs:
             clang cmake ninja-build pkg-config file binutils \
             libgtk-3-dev libepoxy-dev libmpv-dev libsecret-1-dev \
             libayatana-appindicator3-dev libjsoncpp-dev \
+            libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev \
             erofs-utils
       - name: Prepare Linux release settings
         run: python3 tool/prepare-ci-release.py

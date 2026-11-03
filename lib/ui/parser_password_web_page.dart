@@ -11,6 +11,7 @@ import '../data/parser_rules/password_document.dart';
 import '../data/parser_rules/password_web_flow.dart';
 import '../data/parser_rules/site_protection.dart';
 import '../diagnostics/app_log.dart';
+import '../platform/login_browser.dart';
 import '../platform/windows_webview.dart';
 import 'common.dart';
 import 'login_webview.dart';
@@ -539,6 +540,41 @@ class _ParserPasswordWebPageState extends State<ParserPasswordWebPage> {
                       onPressed: _reload,
                       icon: const Icon(Icons.refresh),
                       label: const Text('重新加载'),
+                    ),
+                  )
+                : loginBrowserIsDetached
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.travel_explore_outlined,
+                            size: 40,
+                            color: themeAccent(context),
+                          ),
+                          const SizedBox(height: 14),
+                          const Text(
+                            '这一步需要内嵌浏览器',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          Text(
+                            'Linux 版没有内嵌浏览器。请用上方的“浏览器打开”在系统浏览器里完成'
+                            '验证，再把拿到的内容粘贴回来。',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 12,
+                              height: 1.7,
+                              color: secondary(context),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   )
                 : InAppWebView(

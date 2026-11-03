@@ -22,6 +22,7 @@ import '../domain/weiyun_web_login.dart';
 import '../domain/tianyi_web_login.dart';
 import '../diagnostics/app_log.dart';
 import '../diagnostics/web_login_diagnostics.dart';
+import '../platform/login_browser.dart';
 import 'common.dart';
 import 'loading_indicator.dart';
 import 'native_password_login_page.dart';
@@ -521,15 +522,17 @@ class WebLoginPage extends StatefulWidget {
 class _WebLoginWindow {
   _WebLoginWindow(this.id);
   final int id;
-  InAppWebViewController? controller;
+  LoginBrowserPage? controller;
 }
 
 class _WebLoginPageState extends State<WebLoginPage>
     with WidgetsBindingObserver {
   WebViewEnvironment? environment;
-  InAppWebViewController? controller;
-  InAppWebViewController? checkingWeb;
-  CookieManager? cookies;
+  LoginBrowserPage? controller;
+  LoginBrowserPage? checkingWeb;
+  LoginCookieJar? cookies;
+  DetachedLoginPage? _detached;
+  StreamSubscription<LinuxWebViewEvent>? _detachedEvents;
   Timer? timer;
   final clock = Stopwatch()..start(), policy = LoginPollingPolicy();
   final _storageSession = newId();
@@ -542,7 +545,12 @@ class _WebLoginPageState extends State<WebLoginPage>
   bool _baiduAutoReturn = false;
   String _baiduError = '';
   bool get _baiduNative =>
-      widget.baiduNativeLogin && widget.target.platform == CloudPlatform.baidu;
+      widget.baiduNativeLogin &&
+      widget.target.platform == CloudPlatform.baidu &&
+      // The native SMS panel drives a hidden page through script injection.
+      // Linux shows the provider's own page in a separate window instead, and
+      // that page already offers SMS login.
+      !loginBrowserIsDetached;
   bool get _baiduBusy =>
       _baiduExecuting ||
       const {
@@ -575,9 +583,11 @@ class _WebLoginPageState extends State<WebLoginPage>
   bool get checking => checkingWeb != null;
   late final diagnostics = WebLoginDiagnostics(widget.target.platform);
   // Creation and event callbacks can wrap the same native controller twice.
-  bool _sameWeb(InAppWebViewController? left, InAppWebViewController? right) =>
-      left != null && right != null && identical(left.platform, right.platform);
-  bool _current(InAppWebViewController web) =>
+  bool _sameWeb(LoginBrowserPage? left, LoginBrowserPage? right) =>
+      left != null &&
+      right != null &&
+      left.identityKey == right.identityKey;
+  bool _current(LoginBrowserPage web) =>
       active &&
       ready &&
       (_sameWeb(controller, web) ||
@@ -623,6 +633,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     timer?.cancel();
     widget.services.login.invalidate(widget.target.platform);
     unawaited(_forgetBrowserCookies(logFailure: false));
+    unawaited(_closeDetached());
   }
 
   void _switchToPassword() {
@@ -861,6 +872,211 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
   }
 
+  /// Scripts the detached Linux window needs.
+  ///
+  /// Mirrors `initialUserScripts` in [_webView]; WebKitGTK cannot scope a
+  /// script to an origin, so [openDetachedLoginPage] turns the origin rules
+  /// into host guards.
+  List<UserScript> get _detachedScripts => [
+    if (widget.target.desktopMode && !_baiduNative) desktopLoginUserScript(),
+    if (widget.target.platform == CloudPlatform.tianyi)
+      UserScript(
+        source: TianyiWebLogin.mobileFormScript,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
+        allowedOriginRules: const {'https://open.e.189.cn'},
+      ),
+    if (widget.target.platform == CloudPlatform.tianyi)
+      UserScript(
+        source: TianyiWebLogin.bootstrapScript,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
+        allowedOriginRules: TianyiWebLogin.origins,
+      ),
+    if (widget.target.platform == CloudPlatform.weiyun)
+      UserScript(
+        source: WeiyunWebLogin.bootstrapScript,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
+        allowedOriginRules: WeiyunWebLogin.origins,
+      ),
+    if (widget.target.localStorageKey != null)
+      UserScript(
+        source: widget.target.prepareStorageScript(_storageSession),
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
+        allowedOriginRules: widget.target.storageOriginRules,
+      ),
+    if (widget.passwordLogin != null)
+      UserScript(
+        source: widget.passwordLogin!.bootstrapScript,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: false,
+        allowedOriginRules: AliyunWebPassword.origins,
+      ),
+  ];
+
+  Future<void> _openDetachedWindow() async {
+    await _closeDetached();
+    final page = await openDetachedLoginPage(
+      url: widget.target.url,
+      userAgent: widget.target.userAgent,
+      title: '${widget.target.platform.shortName}登录',
+      initScripts: _detachedScripts,
+    );
+    controller = page;
+    _detached = page;
+    _detachedEvents = page.events.listen(_onDetachedEvent);
+    diagnostics.record('detached_window_opened', stage: 'initialize');
+  }
+
+  Future<void> _closeDetached() async {
+    final events = _detachedEvents;
+    final page = _detached;
+    _detachedEvents = null;
+    _detached = null;
+    await events?.cancel();
+    if (page == null) return;
+    if (identical(controller, page)) controller = null;
+    await page.close();
+  }
+
+  void _onDetachedEvent(LinuxWebViewEvent event) {
+    final page = _detached;
+    if (!active || page == null) return;
+    switch (event.type) {
+      case LinuxWebViewEvent.loadStarted:
+        if (_sameWeb(page, controller)) passwordDocumentReady = false;
+        diagnostics.pageStarted();
+      case LinuxWebViewEvent.loadFinished:
+        unawaited(_loadedPage(page));
+      case LinuxWebViewEvent.urlChanged:
+        if (ready) unawaited(_poll());
+      case LinuxWebViewEvent.progressChanged:
+        if (mounted) setState(() => progress = event.progress ?? 0);
+      case LinuxWebViewEvent.loadFailed:
+        if (mounted) setState(() => status = '网页加载失败，可刷新后重试');
+      case LinuxWebViewEvent.navigation:
+        unawaited(_resolveDetachedNavigation(page, event));
+      case LinuxWebViewEvent.closed:
+        unawaited(_detachedClosed(page));
+      case LinuxWebViewEvent.processTerminated:
+        unawaited(_detachedTerminated(page));
+      default:
+        // newWindow / titleChanged need no bookkeeping: popups are separate
+        // native windows that share this window's cookie jar.
+        break;
+    }
+  }
+
+  Future<void> _resolveDetachedNavigation(
+    DetachedLoginPage page,
+    LinuxWebViewEvent event,
+  ) async {
+    final token = event.token;
+    if (token == null) return;
+    final raw = event.url;
+    final uri = raw == null ? null : Uri.tryParse(raw);
+    var allow =
+        active &&
+        uri != null &&
+        const {'http', 'https', 'about'}.contains(uri.scheme);
+    if (allow &&
+        event.mainFrame &&
+        widget.target.platform == CloudPlatform.tianyi &&
+        TianyiWebLogin.isCompletionLanding(raw)) {
+      // Same rule as shouldOverrideUrlLoading on the embedded platforms: the
+      // SSO callback already stored its HttpOnly cookies and the follow-up
+      // document would send this UA to a client promotion page.
+      diagnostics.record('completion_redirect', stage: 'read_credentials');
+      unawaited(_poll(userInitiated: true));
+      allow = false;
+    }
+    try {
+      await page.resolveNavigation(token, allow: allow);
+    } catch (_) {
+      // The window can disappear between the event and this answer.
+    }
+  }
+
+  Future<void> _detachedClosed(DetachedLoginPage page) async {
+    if (!active || !identical(_detached, page)) return;
+    await _detachedEvents?.cancel();
+    _detachedEvents = null;
+    _detached = null;
+    if (identical(controller, page)) controller = null;
+    if (!mounted) return;
+    setState(() {
+      ready = false;
+      error = '登录窗口已关闭，可重新打开或切换手动登录';
+    });
+  }
+
+  Future<void> _detachedTerminated(DetachedLoginPage page) async {
+    if (!active) return;
+    timer?.cancel();
+    widget.services.login.invalidate(widget.target.platform);
+    await _closeDetached();
+    checkingWeb = null;
+    if (!mounted) return;
+    setState(() {
+      ready = false;
+      error = '登录页面已停止运行，请重试或切换登录方式';
+    });
+  }
+
+  void _presentDetached() => unawaited(_detached?.present());
+
+  /// Shown instead of an embedded page on Linux, where the login page lives in
+  /// its own native window.
+  Widget _detachedPanel(BuildContext context) => Center(
+    child: SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(CupertinoIcons.globe, size: 42, color: themeAccent(context)),
+          const SizedBox(height: 16),
+          const Text(
+            '登录页面已在独立窗口中打开',
+            style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Linux 版没有内嵌浏览器，请在刚打开的系统窗口里完成登录；'
+            '完成后回到这里点“检测登录”。窗口关掉后可以重新打开。',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.7,
+              color: secondary(context),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                key: const ValueKey('detached-login-present'),
+                onPressed: _presentDetached,
+                icon: const Icon(CupertinoIcons.arrow_up_right_square, size: 18),
+                label: const Text('显示登录窗口'),
+              ),
+              OutlinedButton.icon(
+                key: const ValueKey('detached-login-reopen'),
+                onPressed: () => unawaited(_refresh()),
+                icon: const Icon(CupertinoIcons.arrow_clockwise, size: 18),
+                label: const Text('重新打开'),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+  );
+
   Future<void> _initialize() async {
     timer?.cancel();
     diagnostics.record('initialize_started', stage: 'initialize');
@@ -874,7 +1090,7 @@ class _WebLoginPageState extends State<WebLoginPage>
         flush: _flushLogin,
       );
       widget.services.control.checkCloud(widget.target.platform);
-      cookies = CookieManager.instance(webViewEnvironment: environment);
+      cookies = await createLoginCookieJar(environment);
       // SSO cookies may live on authentication hosts that are not part of the
       // provider API domain list. Clear the whole browser jar before rendering
       // so adding an account can never silently reuse the previous login.
@@ -884,6 +1100,10 @@ class _WebLoginPageState extends State<WebLoginPage>
       _tianyiCaptureState = '';
       _baiduView = null;
       _baiduViewRevision++;
+      if (loginBrowserIsDetached) {
+        await _openDetachedWindow();
+        if (!active) return;
+      }
       setState(() => ready = true);
       diagnostics.record(
         'initialize_completed',
@@ -907,7 +1127,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
   }
 
-  Future<String> _readCredentials(InAppWebViewController web, int poll) async {
+  Future<String> _readCredentials(LoginBrowserPage web, int poll) async {
     final target = widget.target;
     final readCookies =
         target.localStorageKey == null ||
@@ -1039,7 +1259,7 @@ class _WebLoginPageState extends State<WebLoginPage>
             flush: _flushLogin,
           );
           final pairs = await cookies!
-              .getCookies(url: WebUri(url), webViewController: web)
+              .getCookies(url: Uri.parse(url), view: web)
               .timeout(const Duration(seconds: 3));
           successfulReads++;
           diagnostics.record(
@@ -1295,7 +1515,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     }
   }
 
-  Future<void> _submitWebPassword(InAppWebViewController web) async {
+  Future<void> _submitWebPassword(LoginBrowserPage web) async {
     final attempt = widget.passwordLogin;
     if (attempt == null ||
         passwordUnavailable ||
@@ -1360,7 +1580,11 @@ class _WebLoginPageState extends State<WebLoginPage>
     });
   }
 
-  Future<void> _loaded(InAppWebViewController web, WebUri? uri) async {
+  /// Callback adapter for the embedded platforms (`onLoadStop`).
+  Future<void> _loaded(InAppWebViewController web, WebUri? uri) =>
+      _loadedPage(EmbeddedLoginPage(web));
+
+  Future<void> _loadedPage(LoginBrowserPage web) async {
     if (!_current(web)) return;
     diagnostics.pageLoaded();
     try {
@@ -1387,13 +1611,14 @@ class _WebLoginPageState extends State<WebLoginPage>
     InAppWebViewController web,
     RenderProcessGoneDetail detail,
   ) {
-    if (!_current(web)) return;
+    final page = EmbeddedLoginPage(web);
+    if (!_current(page)) return;
     diagnostics.rendererGone(
       didCrash: detail.didCrash,
       priority: detail.rendererPriorityAtExit?.toNativeValue(),
     );
     final popup = _windows
-        .where((window) => _sameWeb(window.controller, web))
+        .where((window) => _sameWeb(window.controller, page))
         .firstOrNull;
     if (popup != null) {
       _closeWindow(popup.id);
@@ -1504,13 +1729,13 @@ class _WebLoginPageState extends State<WebLoginPage>
         flush: _flushLogin,
       );
       if (popup == null) {
-        controller = web;
+        controller = EmbeddedLoginPage(web);
       } else if (_windows.contains(popup)) {
-        popup.controller = web;
+        popup.controller = EmbeddedLoginPage(web);
       }
     },
     onCreateWindow: (web, action) async {
-      if (!_current(web) || _windows.length >= 3) return false;
+      if (!_current(_page(web)) || _windows.length >= 3) return false;
       final url = action.request.url;
       if (url != null && !{'http', 'https', 'about'}.contains(url.scheme)) {
         return false;
@@ -1524,20 +1749,20 @@ class _WebLoginPageState extends State<WebLoginPage>
       if (popup != null) _closeWindow(popup.id);
     },
     onLoadStart: (web, _) {
-      if (_current(web)) {
-        if (_sameWeb(web, controller)) passwordDocumentReady = false;
+      if (_current(_page(web))) {
+        if (_sameWeb(_page(web), controller)) passwordDocumentReady = false;
         diagnostics.pageStarted();
       }
     },
     onLoadStop: _loaded,
     onUpdateVisitedHistory: (web, _, _) {
-      if (_current(web)) unawaited(_poll());
+      if (_current(_page(web))) unawaited(_poll());
     },
     onProgressChanged: (web, value) {
-      if (_current(web)) setState(() => progress = value / 100);
+      if (_current(_page(web))) setState(() => progress = value / 100);
     },
     onReceivedError: (web, request, error) {
-      if (!_current(web)) return;
+      if (!_current(_page(web))) return;
       diagnostics.resourceFailed(
         isMainFrame: request.isForMainFrame,
         type: error.type.toValue(),
@@ -1548,7 +1773,7 @@ class _WebLoginPageState extends State<WebLoginPage>
       }
     },
     onReceivedHttpError: (web, request, response) {
-      if (!_current(web)) return;
+      if (!_current(_page(web))) return;
       diagnostics.httpFailed(
         isMainFrame: request.isForMainFrame,
         status: response.statusCode,
@@ -1560,7 +1785,7 @@ class _WebLoginPageState extends State<WebLoginPage>
     onRenderProcessGone: _rendererGone,
     shouldOverrideUrlLoading: (web, action) async {
       final url = action.request.url;
-      if (_current(web) &&
+      if (_current(_page(web)) &&
           widget.target.platform == CloudPlatform.tianyi &&
           action.isForMainFrame &&
           TianyiWebLogin.isCompletionLanding(url?.toString())) {
@@ -1578,6 +1803,10 @@ class _WebLoginPageState extends State<WebLoginPage>
           : NavigationActionPolicy.CANCEL;
     },
   );
+
+  /// The InAppWebView callbacks hand over the raw controller; the login logic
+  /// works on [LoginBrowserPage] so both back ends look the same.
+  LoginBrowserPage _page(InAppWebViewController web) => EmbeddedLoginPage(web);
 
   Future<void> _refresh() async {
     if (!active) return;
@@ -1605,7 +1834,8 @@ class _WebLoginPageState extends State<WebLoginPage>
       await _initialize();
       return;
     }
-    if (error.isNotEmpty) {
+    if (error.isNotEmpty ||
+        (loginBrowserIsDetached && _detached == null)) {
       setState(() {
         error = '';
         ready = false;
@@ -1748,6 +1978,8 @@ class _WebLoginPageState extends State<WebLoginPage>
                   )
                 : !ready
                 ? const Center(child: CircularProgressIndicator())
+                : loginBrowserIsDetached
+                ? _detachedPanel(context)
                 : IndexedStack(
                     index: _baiduNative && !_baiduWebVisible ? 1 : 0,
                     children: [
@@ -2373,7 +2605,9 @@ class XunleiVerificationPage extends StatefulWidget {
 }
 
 class _XunleiVerificationPageState extends State<XunleiVerificationPage> {
-  InAppWebViewController? controller;
+  LoginBrowserPage? controller;
+  DetachedLoginPage? _detached;
+  StreamSubscription<LinuxWebViewEvent>? _detachedEvents;
   WebViewEnvironment? environment;
   Timer? timer;
   bool ready = false, finished = false, polling = false;
@@ -2389,10 +2623,72 @@ class _XunleiVerificationPageState extends State<XunleiVerificationPage> {
   Future<void> _initialize() async {
     try {
       environment = await widget.services.webEnvironment();
+      if (loginBrowserIsDetached) {
+        final page = await openDetachedLoginPage(
+          url: url,
+          userAgent: WebLoginTarget.desktopUserAgent,
+          title: '迅雷安全验证',
+          initScripts: [desktopLoginUserScript()],
+        );
+        controller = page;
+        _detached = page;
+        _detachedEvents = page.events.listen(_onDetachedEvent);
+      }
       if (mounted) setState(() => ready = true);
       timer = Timer.periodic(const Duration(milliseconds: 700), (_) => _poll());
     } catch (e) {
       if (mounted) setState(() => error = errorText(e));
+    }
+  }
+
+  void _onDetachedEvent(LinuxWebViewEvent event) {
+    final page = _detached;
+    if (page == null || finished) return;
+    switch (event.type) {
+      case LinuxWebViewEvent.loadFinished:
+        unawaited(_injectDetached(page));
+      case LinuxWebViewEvent.navigation:
+        unawaited(_resolveDetachedNavigation(page, event));
+      case LinuxWebViewEvent.closed:
+        if (mounted && !finished) {
+          setState(() {
+            ready = false;
+            error = '验证窗口已关闭，可重新打开';
+          });
+        }
+      default:
+        break;
+    }
+  }
+
+  Future<void> _injectDetached(DetachedLoginPage page) async {
+    try {
+      if (!XunleiProtocol.trustedPage((await page.getUrl())?.toString())) return;
+      await page.evaluateJavascript(source: desktopLoginViewportScript);
+      await page.evaluateJavascript(source: script);
+    } catch (_) {
+      // A redirect can replace the document while the scripts run.
+    }
+  }
+
+  Future<void> _resolveDetachedNavigation(
+    DetachedLoginPage page,
+    LinuxWebViewEvent event,
+  ) async {
+    final token = event.token;
+    if (token == null) return;
+    final target = event.url;
+    var allow = XunleiProtocol.trustedPage(target);
+    if (event.mainFrame && XunleiProtocol.trustedCallback(target)) {
+      if (XunleiProtocol.trustedPage((await page.getUrl())?.toString())) {
+        _finish();
+      }
+      allow = false;
+    }
+    try {
+      await page.resolveNavigation(token, allow: allow);
+    } catch (_) {
+      // The window can close between the event and this answer.
     }
   }
 
@@ -2457,6 +2753,8 @@ class _XunleiVerificationPageState extends State<XunleiVerificationPage> {
   @override
   void dispose() {
     timer?.cancel();
+    unawaited(_detachedEvents?.cancel());
+    unawaited(_detached?.close());
     super.dispose();
   }
 
@@ -2468,6 +2766,29 @@ class _XunleiVerificationPageState extends State<XunleiVerificationPage> {
         ? EmptyPanel('验证页面不可用', error)
         : !ready
         ? const Center(child: CircularProgressIndicator())
+        : loginBrowserIsDetached
+        ? Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  '安全验证已在独立窗口中打开',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  '请在系统窗口里完成验证，完成后回到这里点右上角“已完成验证”。',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(fontSize: 12, color: secondary(context)),
+                ),
+                const SizedBox(height: 18),
+                FilledButton.tonal(
+                  onPressed: () => unawaited(_detached?.present()),
+                  child: const Text('显示验证窗口'),
+                ),
+              ],
+            ),
+          )
         : InAppWebView(
             webViewEnvironment: environment,
             initialUrlRequest: URLRequest(url: WebUri(url)),
@@ -2475,7 +2796,7 @@ class _XunleiVerificationPageState extends State<XunleiVerificationPage> {
             initialUserScripts: UnmodifiableListView([
               desktopLoginUserScript(),
             ]),
-            onWebViewCreated: (web) => controller = web,
+            onWebViewCreated: (web) => controller = EmbeddedLoginPage(web),
             onLoadStop: (web, page) async {
               if (XunleiProtocol.trustedPage(page?.toString()) &&
                   XunleiProtocol.trustedPage(

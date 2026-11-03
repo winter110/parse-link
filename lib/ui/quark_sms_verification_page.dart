@@ -9,6 +9,7 @@ import '../data/providers/quark.dart';
 import '../data/providers/quark_login.dart';
 import '../domain/models.dart';
 import '../domain/quark_sms_verification.dart';
+import '../platform/login_browser.dart';
 import 'common.dart';
 import 'login_webview.dart';
 
@@ -28,8 +29,10 @@ class QuarkSmsVerificationPage extends StatefulWidget {
 
 class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
   WebViewEnvironment? _environment;
-  InAppWebViewController? _web;
-  CookieManager? _cookies;
+  LoginBrowserPage? _web;
+  DetachedLoginPage? _detached;
+  StreamSubscription<LinuxWebViewEvent>? _detachedEvents;
+  LoginCookieJar? _cookies;
   Timer? _timer;
   bool _ready = false, _finished = false, _checking = false;
   String _error = '';
@@ -46,12 +49,91 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
       widget.services.control.checkCloud(CloudPlatform.quark);
       _environment = await widget.services.webEnvironment();
       if (!_active) return;
-      _cookies = CookieManager.instance(webViewEnvironment: _environment);
+      _cookies = await createLoginCookieJar(_environment);
       await _cookies!.deleteAllCookies();
+      if (!_active) return;
+      if (loginBrowserIsDetached) {
+        await _openDetached();
+        if (!_active) return;
+      }
       if (_active) setState(() => _ready = true);
     } catch (_) {
       if (_active) setState(() => _error = '安全验证初始化失败，请返回重试或切换网页登录');
     }
+  }
+
+  Future<void> _openDetached() async {
+    await _closeDetached();
+    final page = await openDetachedLoginPage(
+      url: QuarkLoginService.mobilePage,
+      userAgent: QuarkConnector.webUa,
+      title: '夸克安全验证',
+    );
+    _web = page;
+    _detached = page;
+    _detachedEvents = page.events.listen(_onDetachedEvent);
+  }
+
+  Future<void> _closeDetached() async {
+    final events = _detachedEvents;
+    final page = _detached;
+    _detachedEvents = null;
+    _detached = null;
+    await events?.cancel();
+    if (page == null) return;
+    if (identical(_web, page)) _web = null;
+    await page.close();
+  }
+
+  void _onDetachedEvent(LinuxWebViewEvent event) {
+    final page = _detached;
+    if (!_active || page == null) return;
+    switch (event.type) {
+      case LinuxWebViewEvent.loadFinished:
+        if (!QuarkSmsVerification.trustedPage(event.url)) return;
+        _web = page;
+        _restartPolling();
+        unawaited(_capture());
+      case LinuxWebViewEvent.loadFailed:
+        if (_active) {
+          setState(() => _error = '安全验证加载失败，请返回重试或切换网页登录');
+        }
+      case LinuxWebViewEvent.navigation:
+        unawaited(_resolveDetachedNavigation(page, event));
+      case LinuxWebViewEvent.closed:
+        if (_active) {
+          setState(() {
+            _ready = false;
+            _error = '验证窗口已关闭，可重新加载安全验证';
+          });
+        }
+      default:
+        break;
+    }
+  }
+
+  Future<void> _resolveDetachedNavigation(
+    DetachedLoginPage page,
+    LinuxWebViewEvent event,
+  ) async {
+    final token = event.token;
+    if (token == null) return;
+    final allow =
+        _active &&
+        (!event.mainFrame || QuarkSmsVerification.trustedPage(event.url));
+    try {
+      await page.resolveNavigation(token, allow: allow);
+    } catch (_) {
+      // The window can close between the event and this answer.
+    }
+  }
+
+  void _restartPolling() {
+    _timer?.cancel();
+    _timer = Timer.periodic(
+      const Duration(milliseconds: 350),
+      (_) => unawaited(_capture()),
+    );
   }
 
   Future<void> _capture() async {
@@ -79,8 +161,8 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
       final fields = data.map((key, value) => MapEntry(key, value as String));
       if (!QuarkCaptchaProof(fields).valid) return;
       final cookies = await _cookies!.getCookies(
-        url: WebUri(QuarkLoginService.mobilePage),
-        webViewController: web,
+        url: Uri.parse(QuarkLoginService.mobilePage),
+        view: web,
       );
       if (!_active || !identical(_web, web)) return;
       // Preserve domain/path scoping when moving this private attempt's cookies
@@ -89,13 +171,14 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
         for (final cookie in cookies)
           '${cookie.name}=${cookie.value}; Path=${cookie.path ?? '/'}'
               '${cookie.domain == null ? '' : '; Domain=${cookie.domain}'}'
-              '${cookie.isSecure == true ? '; Secure' : ''}',
+              '${cookie.secure ? '; Secure' : ''}',
       ]);
       _timer?.cancel();
       await _cookies!.deleteAllCookies();
       if (!mounted || !_active || !identical(_web, web)) return;
       _finished = true;
-      Navigator.pop(context, proof);
+      await _closeDetached();
+      if (mounted) Navigator.pop(context, proof);
     } catch (_) {
       // A redirect or an SDK reload can replace the document while polling.
       // The next poll retries against the current official document.
@@ -107,6 +190,7 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
   void _stop() {
     _finished = true;
     _timer?.cancel();
+    unawaited(_closeDetached());
   }
 
   void _reload() {
@@ -148,6 +232,35 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
                   )
                 : !_ready
                 ? const Center(child: CircularProgressIndicator())
+                : loginBrowserIsDetached
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          '安全验证已在独立窗口中打开',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          '请在系统窗口里完成官方安全验证，完成后会自动发送短信验证码。',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: secondary(context),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        FilledButton.tonal(
+                          onPressed: () => unawaited(_detached?.present()),
+                          child: const Text('显示验证窗口'),
+                        ),
+                      ],
+                    ),
+                  )
                 : InAppWebView(
                     webViewEnvironment: _environment,
                     initialUrlRequest: URLRequest(
@@ -157,18 +270,14 @@ class _QuarkSmsVerificationPageState extends State<QuarkSmsVerificationPage> {
                       userAgent: QuarkConnector.webUa,
                       desktopMode: false,
                     ),
-                    onWebViewCreated: (web) => _web = web,
+                    onWebViewCreated: (web) => _web = EmbeddedLoginPage(web),
                     onLoadStop: (web, url) {
                       if (!_active ||
                           !QuarkSmsVerification.trustedPage(url?.toString())) {
                         return;
                       }
-                      _web = web;
-                      _timer?.cancel();
-                      _timer = Timer.periodic(
-                        const Duration(milliseconds: 350),
-                        (_) => unawaited(_capture()),
-                      );
+                      _web = EmbeddedLoginPage(web);
+                      _restartPolling();
                       unawaited(_capture());
                     },
                     onReceivedError: (_, request, _) {
