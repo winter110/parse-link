@@ -714,6 +714,12 @@ void CloseWindows(const std::function<void(Session*)>& each) {
 
 void OnMethodCall(FlMethodChannel* channel, FlMethodCall* method_call,
                   gpointer user_data) {
+  // Every handler below reaches for g_plugin; a null one used to be a
+  // segfault on the platform thread, which killed the whole app.
+  if (g_plugin == nullptr) {
+    RespondError(method_call, "plugin", "网页登录组件尚未就绪");
+    return;
+  }
   const gchar* name = fl_method_call_get_name(method_call);
   FlValue* args = fl_method_call_get_args(method_call);
 
@@ -890,34 +896,33 @@ void OnMethodCall(FlMethodChannel* channel, FlMethodCall* method_call,
 
 FlMethodErrorResponse* OnListen(FlEventChannel* channel, FlValue* args,
                                 gpointer user_data) {
+  if (g_plugin == nullptr) return nullptr;
   g_plugin->listening = true;
   return nullptr;
 }
 
 FlMethodErrorResponse* OnCancel(FlEventChannel* channel, FlValue* args,
                                 gpointer user_data) {
+  if (g_plugin == nullptr) return nullptr;
   g_plugin->listening = false;
   return nullptr;
 }
 
-void OnPluginDispose(gpointer user_data) {
-  Plugin* plugin = static_cast<Plugin*>(user_data);
-  g_plugin = plugin;
-  CloseWindows(nullptr);
-  plugin->sessions.clear();
-  if (plugin->context != nullptr) {
-    g_object_unref(plugin->context);
-    plugin->context = nullptr;
-  }
-  if (plugin->ephemeral_context != nullptr) {
-    g_object_unref(plugin->ephemeral_context);
-    plugin->ephemeral_context = nullptr;
-  }
-  if (plugin->channel != nullptr) g_object_unref(plugin->channel);
-  if (plugin->events != nullptr) g_object_unref(plugin->events);
-  g_plugin = nullptr;
-  delete plugin;
-}
+// The plugin state is process wide on purpose.
+//
+// `fl_plugin_registry_get_registrar_for_plugin` returns a *fresh* registrar and
+// the generated registrant releases it with `g_autoptr` the moment
+// `..._register_with_registrar` returns. Hanging the cleanup off the registrar
+// (`g_object_set_data_full`) therefore ran a few microseconds after
+// registration: it cleared `g_plugin` and deleted the state while the method
+// channel was still live, so the first call from Dart — clearing cookies before
+// a web login — dereferenced null and the platform thread took SIGSEGV, which
+// kills the GTK process outright.
+//
+// The channels outlive the registrar, so they are what the state must follow.
+// Since the channels themselves are owned by the binary messenger for as long
+// as the engine exists, keeping the state alive until the process exits is both
+// simpler and safer than racing the engine teardown order.
 
 }  // namespace
 
@@ -945,8 +950,6 @@ void asterlink_webview_linux_plugin_register_with_registrar(
       fl_event_channel_new(messenger, kEventChannelName, FL_METHOD_CODEC(codec));
 
   g_plugin = plugin.release();
-  g_object_set_data_full(G_OBJECT(registrar), "asterlink_webview_linux", g_plugin,
-                         OnPluginDispose);
   fl_method_channel_set_method_call_handler(g_plugin->channel, OnMethodCall,
                                             g_plugin, nullptr);
   fl_event_channel_set_stream_handlers(g_plugin->events, OnListen, OnCancel,

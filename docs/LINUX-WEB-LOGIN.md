@@ -51,6 +51,47 @@ libwebkit2gtk-4.1-0  libjavascriptcoregtk-4.1-0  libsoup-3.0-0
 
 对应 `tool/package_linux.py` 的 `SONAME_PACKAGES` 三个新条目。不打包、不编译 WebKit 本体。
 
+实际在一台装好 deb 的 Deepin 25 上核对过，运行期所需全在，`dpkg -i` 之后**不需要再补装任何包**：
+
+```
+libwebkit2gtk-4.1-0  libjavascriptcoregtk-4.1-0  libsoup-3.0-0
+bubblewrap  xdg-dbus-proxy        # WebKit 的 WebProcess 沙箱，已在系统里
+```
+
+helper 进程在 `/usr/lib/x86_64-linux-gnu/webkit2gtk-4.1/`（`WebKitWebProcess` 等），
+不是 `/usr/libexec/…`。
+
+## 插件状态不能挂在 registrar 上（2026-11-03 线上崩溃）
+
+**现象**：dpkg 装好的包里点「网页登录」，页面停在「正在准备登录…」两三秒，整个程序消失，
+终端里没有任何输出，`$?` 是 **139**（SIGSEGV，core 已转储）。
+
+**根因**：`fl_plugin_registry_get_registrar_for_plugin()` **每次调用都新建**一个
+`FlPluginRegistrar`，`generated_plugin_registrant.cc` 是用 `g_autoptr` 接的：
+
+```c
+g_autoptr(FlPluginRegistrar) asterlink_webview_linux_registrar =
+    fl_plugin_registry_get_registrar_for_plugin(registry, "AsterlinkWebviewLinuxPlugin");
+asterlink_webview_linux_plugin_register_with_registrar(asterlink_webview_linux_registrar);
+// ← 这里 registrar 被 unref → finalize
+```
+
+所以把清理逻辑挂在 registrar 上（`g_object_set_data_full`）等于**注册函数一返回就执行**：
+`g_plugin` 被置空、状态被 delete，而 method channel 还活着。Dart 侧第一个调用
+（登录前清 cookie 的 `deleteAllCookies`）就走到 `CookieManagerForOrCreate` →
+`g_plugin->context` 解引用空指针 → 平台线程 SIGSEGV → GTK 进程整体退出。
+
+**现在的做法**（`asterlink_webview_linux_plugin.cc` 末尾有注释说明）：
+
+* 状态是**进程级单例**，注册时 `g_plugin = plugin.release()`，不在 registrar 上挂任何析构；
+* `OnMethodCall` / `OnListen` / `OnCancel` 开头判 `g_plugin == nullptr`，返回错误而不是崩；
+* channel / event channel 的引用也由 messenger 持有，不主动 unref。
+
+**没装 gdb / eu-stack 时怎么定位**：`core_pattern` 是 `core` 时，`ulimit -c unlimited`
+跑一次就能在 cwd 拿到 core；用 `pyelftools` 读 `NT_PRSTATUS`（x86_64 寄存器阵列
+从 offset `0x70` 开始，`rip` 是第 17 个）拿到崩溃地址，再按 `NT_FILE` 的映射表换算成
+模块相对偏移，`objdump -d --start-address/--stop-address` 就能看到解引用的那一条指令。
+
 ## 已知限制
 
 * **窗口是独立的**：不能和 Flutter 组件叠放。Linux 上登录页显示的是说明面板，不是网页。
