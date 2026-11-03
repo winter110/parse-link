@@ -8,6 +8,7 @@ import '../app_services.dart';
 import '../core/json.dart';
 import '../data/resource_search_api.dart';
 import '../data/search_security.dart';
+import '../platform/login_browser.dart';
 import 'common.dart';
 import 'login_webview.dart';
 
@@ -410,6 +411,8 @@ class _TencentVerificationPageState extends State<_TencentVerificationPage> {
         ? Center(child: Text(_error))
         : !_ready
         ? const Center(child: CircularProgressIndicator())
+        : loginBrowserIsDetached
+        ? const Center(child: Text('安全验证需要内嵌浏览器，请在 Windows 或 Android 版完成'))
         : InAppWebView(
             webViewEnvironment: _environment,
             initialUrlRequest: URLRequest(

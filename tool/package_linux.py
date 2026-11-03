@@ -104,6 +104,10 @@ SONAME_PACKAGES = {
     "libdbusmenu-glib.so.4": "libdbusmenu-glib4",
     "libdbusmenu-gtk3.so.4": "libdbusmenu-gtk3-4",
     "libmpv.so.2": "libmpv2",
+    # Linux web login window (vendor_plugins/asterlink_webview_linux).
+    "libwebkit2gtk-4.1.so.0": "libwebkit2gtk-4.1-0",
+    "libjavascriptcoregtk-4.1.so.0": "libjavascriptcoregtk-4.1-0",
+    "libsoup-3.0.so.0": "libsoup-3.0-0",
     "libjvm.so": None,  # package:jni, Android only
 }
 

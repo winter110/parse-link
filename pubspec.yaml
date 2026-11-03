@@ -27,6 +27,8 @@ dependencies:
   pointycastle: 4.0.0
   asterlink_js:
     path: vendor_plugins/asterlink_js
+  asterlink_webview_linux:
+    path: vendor_plugins/asterlink_webview_linux
   path: 1.9.1
   path_provider: 2.1.6
   flutter_inappwebview: 6.1.5

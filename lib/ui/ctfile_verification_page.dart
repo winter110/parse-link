@@ -10,6 +10,7 @@ import '../core/json.dart';
 import '../domain/auth.dart';
 import '../domain/ctfile_captcha.dart';
 import '../domain/models.dart';
+import '../platform/login_browser.dart';
 import 'common.dart';
 import 'login_webview.dart';
 
@@ -24,7 +25,9 @@ class CtfileVerificationPage extends StatefulWidget {
 
 class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
   WebViewEnvironment? _environment;
-  InAppWebViewController? _web;
+  LoginBrowserPage? _web;
+  DetachedLoginPage? _detached;
+  StreamSubscription<LinuxWebViewEvent>? _detachedEvents;
   Timer? _timer;
   final _answer = TextEditingController();
   String _imageId = newId().replaceAll('-', '');
@@ -32,8 +35,8 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
   String _error = '', _status = '正在加载城通安全验证…';
   int _generation = 0;
   bool get _active => mounted && !_finished;
-  bool _sameWeb(InAppWebViewController? web) =>
-      web != null && _web != null && identical(_web!.platform, web.platform);
+  bool _sameWeb(LoginBrowserPage? web) =>
+      web != null && _web != null && _web!.identityKey == web.identityKey;
 
   @override
   void initState() {
@@ -47,6 +50,11 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
       widget.services.control.checkCloud(CloudPlatform.ctfile);
       if (!widget.challenge.isImage) {
         _environment = await widget.services.webEnvironment();
+        if (loginBrowserIsDetached &&
+            _active &&
+            generation == _generation) {
+          await _openDetached();
+        }
       }
       if (_active && generation == _generation) {
         setState(() => _ready = true);
@@ -113,6 +121,7 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
     _generation++;
     _timer?.cancel();
     _web = null;
+    unawaited(_closeDetached());
   }
 
   void _reload() {
@@ -194,6 +203,85 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
     ),
   );
 
+  Future<void> _openDetached() async {
+    await _closeDetached();
+    final page = await openDetachedLoginPage(
+      url: widget.challenge.url.toString(),
+      userAgent: WebLoginTarget.desktopUserAgent,
+      title: '城通安全验证',
+      initScripts: [
+        UserScript(
+          source: widget.challenge.installScript,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+          forMainFrameOnly: true,
+        ),
+      ],
+    );
+    _web = page;
+    _detached = page;
+    _detachedEvents = page.events.listen(_onDetachedEvent);
+  }
+
+  Future<void> _closeDetached() async {
+    final events = _detachedEvents;
+    final page = _detached;
+    _detachedEvents = null;
+    _detached = null;
+    await events?.cancel();
+    if (page == null) return;
+    if (identical(_web, page)) _web = null;
+    await page.close();
+  }
+
+  void _onDetachedEvent(LinuxWebViewEvent event) {
+    final page = _detached;
+    if (!_active || page == null) return;
+    switch (event.type) {
+      case LinuxWebViewEvent.loadFinished:
+        if (!widget.challenge.trustedPage(event.url)) return;
+        _web = page;
+        _timer?.cancel();
+        _timer = Timer.periodic(
+          const Duration(milliseconds: 350),
+          (_) => unawaited(_capture()),
+        );
+        unawaited(_capture());
+      case LinuxWebViewEvent.loadFailed:
+        if (_active) {
+          _timer?.cancel();
+          setState(() => _error = '城通安全验证页面加载失败，请刷新重试');
+        }
+      case LinuxWebViewEvent.navigation:
+        unawaited(_resolveDetachedNavigation(page, event));
+      case LinuxWebViewEvent.closed:
+        if (_active) {
+          setState(() {
+            _ready = false;
+            _error = '验证窗口已关闭，请刷新重试';
+          });
+        }
+      default:
+        break;
+    }
+  }
+
+  Future<void> _resolveDetachedNavigation(
+    DetachedLoginPage page,
+    LinuxWebViewEvent event,
+  ) async {
+    final token = event.token;
+    if (token == null) return;
+    var allow = _active && !event.mainFrame;
+    if (_active && event.mainFrame) {
+      allow = widget.challenge.trustedPage(event.url);
+    }
+    try {
+      await page.resolveNavigation(token, allow: allow);
+    } catch (_) {
+      // The window can close between the event and this answer.
+    }
+  }
+
   Widget _browser() => InAppWebView(
     key: ValueKey('ctfile-captcha-web-$_generation'),
     webViewEnvironment: _environment,
@@ -210,11 +298,11 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
       ),
     ]),
     onWebViewCreated: (web) {
-      if (_active) _web = web;
+      if (_active) _web = EmbeddedLoginPage(web);
     },
     onLoadStop: (web, url) async {
       if (!_active ||
-          !_sameWeb(web) ||
+          !_sameWeb(EmbeddedLoginPage(web)) ||
           !widget.challenge.trustedPage(url?.toString())) {
         return;
       }
@@ -223,8 +311,8 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
       } catch (_) {
         // A refresh can replace the document during the load callback.
       }
-      if (!_active || !_sameWeb(web)) return;
-      _web = web;
+      if (!_active || !_sameWeb(EmbeddedLoginPage(web))) return;
+      _web = EmbeddedLoginPage(web);
       _timer?.cancel();
       _timer = Timer.periodic(
         const Duration(milliseconds: 350),
@@ -233,7 +321,7 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
       unawaited(_capture());
     },
     onReceivedError: (web, request, _) {
-      if (_active && _sameWeb(web) && request.isForMainFrame == true) {
+      if (_active && _sameWeb(EmbeddedLoginPage(web)) && request.isForMainFrame == true) {
         _timer?.cancel();
         setState(() => _error = '城通安全验证页面加载失败，请刷新重试');
       }
@@ -289,6 +377,35 @@ class _CtfileVerificationPageState extends State<CtfileVerificationPage> {
                     '验证页面不可用',
                     _error,
                     icon: CupertinoIcons.lock_shield,
+                  )
+                : loginBrowserIsDetached
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          '安全验证已在独立窗口中打开',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          '请在系统窗口里完成验证，完成后会自动继续登录。',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: secondary(context),
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        FilledButton.tonal(
+                          onPressed: () => unawaited(_detached?.present()),
+                          child: const Text('显示验证窗口'),
+                        ),
+                      ],
+                    ),
                   )
                 : _browser(),
           ),

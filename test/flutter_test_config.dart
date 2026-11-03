@@ -1,4 +1,5 @@
 import 'package:asterlink/core/crypto_box.dart';
+import 'package:asterlink/platform/login_browser.dart';
 
 /// Runs before every test file under `test/`.
 ///
@@ -12,5 +13,10 @@ import 'package:asterlink/core/crypto_box.dart';
 /// together with the assert that reads it.
 Future<void> testExecutable(Future<void> Function() testMain) async {
   CryptoBox.testingRounds = 2000;
+  // The Linux login window is a native GTK window driven through a plugin that
+  // only exists in a real build. Login tests install a fake
+  // InAppWebViewPlatform instead, so they must keep taking the embedded path
+  // even though the test host is Linux.
+  overrideLoginBrowserDetached(false);
   await testMain();
 }

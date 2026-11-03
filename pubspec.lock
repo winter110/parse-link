@@ -24,6 +24,13 @@ packages:
       relative: true
     source: path
     version: "1.0.0"
+  asterlink_webview_linux:
+    dependency: "direct main"
+    description:
+      path: "vendor_plugins/asterlink_webview_linux"
+      relative: true
+    source: path
+    version: "0.1.0"
   async:
     dependency: transitive
     description:
