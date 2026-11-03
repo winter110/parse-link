@@ -2369,7 +2369,9 @@ class DownloadManager extends ChangeNotifier {
             : e is AppException
             ? e.message
             : e is FileSystemException
-            ? '读写文件失败，请检查存储空间和目录权限'
+            ? e.osError?.errorCode == 36
+                  ? '文件名或保存路径过长，所选文件系统无法创建，请缩短名称后重试'
+                  : '读写文件失败，请检查存储空间和目录权限'
             : '下载失败，请检查网络后重试';
         await _update(id, {
           'status': run.stopped || e is _Stopped ? 'paused' : 'failed',

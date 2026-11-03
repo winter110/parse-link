@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,24 @@ import 'android_download_file.dart';
 import 'native_engine.dart';
 import 'posix_storage.dart';
 import 'windows_storage.dart';
+
+/// Per-component byte budget for a published name.
+///
+/// ext4 caps one component at 255 bytes, so a Chinese name has to be shortened
+/// by bytes: 160 Chinese characters are 480 bytes and ext4 refuses them with
+/// ENAMETOOLONG. NTFS (ntfs-3g) caps at 255 *characters*, which 240 bytes always
+/// satisfies. A 160-*character* cut — what this used to do — published those
+/// 480-byte names verbatim, so the whole download failed at publish time, after
+/// the bytes were on disk, with a message that blamed the disk.
+const _nameByteLimit = 240;
+
+/// Room for the ` (10000)` suffix `save()` appends when the name is already
+/// taken. Without it the retry would be longer than the limit again.
+const _collisionRoom = 12;
+
+/// Extensions longer than this are dropped rather than kept: a 240-byte
+/// extension would leave no room for the base name at all.
+const _maxExtensionBytes = 40;
 
 String safeFileName(String raw) {
   var name = raw
@@ -20,11 +39,47 @@ String safeFileName(String raw) {
   ).hasMatch(name)) {
     name = '_$name';
   }
-  if (name.length > 180) {
-    final ext = p.extension(name);
-    name = '${name.substring(0, 160)}${ext.length < 20 ? ext : ''}';
+  return _limitNameBytes(name);
+}
+
+String _limitNameBytes(String name) {
+  if (utf8.encode(name).length <= _nameByteLimit - _collisionRoom) return name;
+  final ext = p.extension(name);
+  final extBytes = utf8.encode(ext).length;
+  if (extBytes > _maxExtensionBytes) {
+    return _finishName(_cutToByteBudget(name, _nameByteLimit - _collisionRoom));
   }
-  return name;
+  final budget = _nameByteLimit - _collisionRoom - extBytes;
+  final base = p.basenameWithoutExtension(name);
+  return _finishName('${_cutToByteBudget(base, budget)}$ext');
+}
+
+/// Keeps the longest prefix of [value] that fits in [budget] UTF-8 bytes.
+///
+/// The cut has to land on a character boundary: slicing inside a multi-byte
+/// character yields invalid UTF-8, which ntfs-3g refuses to store at all.
+String _cutToByteBudget(String value, int budget) {
+  final kept = StringBuffer();
+  var bytes = 0;
+  for (final rune in value.runes) {
+    final size = _runeBytes(rune);
+    if (bytes + size > budget) break;
+    kept.writeCharCode(rune);
+    bytes += size;
+  }
+  return kept.toString();
+}
+
+int _runeBytes(int rune) =>
+    rune < 0x80 ? 1 : rune < 0x800 ? 2 : rune < 0x10000 ? 3 : 4;
+
+String _finishName(String name) {
+  // Truncating can expose a trailing dot or space, which NTFS rejects.
+  final trimmed = name.replaceAll(RegExp(r'[. ]+$'), '');
+  if (trimmed.isEmpty || trimmed == '.' || trimmed == '..') {
+    return 'download.bin';
+  }
+  return trimmed;
 }
 
 String safeRelativePath(String raw) => raw
