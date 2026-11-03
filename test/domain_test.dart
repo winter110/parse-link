@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:asterlink/core/json.dart';
 import 'package:asterlink/domain/auth.dart';
@@ -433,4 +435,31 @@ https://github.com/example/files
       expect(safeRelativePath('../a/../../b').contains('..'), isFalse);
     },
   );
+  test('Published names stay inside the byte limit of every file system', () {
+    // ext4 caps a component at 255 bytes (NTFS/ntfs-3g caps at 255 characters),
+    // so a long Chinese name has to be cut by bytes — and never inside a
+    // character. A 160-character Chinese name is 480 bytes and used to be
+    // published as-is, which failed the whole save with ENAMETOOLONG on ext4.
+    const longChinese = '汉';
+    final name = safeFileName(longChinese * 200 + '.mkv');
+    expect(utf8.encode(name).length, lessThanOrEqualTo(240));
+    expect(name.endsWith('.mkv'), isTrue);
+    expect(utf8.decode(utf8.encode(name)), name); // still valid UTF-8
+    // The ` (1)` collision suffix `save()` appends must still fit.
+    expect(utf8.encode('$name (1)').length, lessThanOrEqualTo(240));
+
+    final ascii = safeFileName('a' * 400 + '.zip');
+    expect(utf8.encode(ascii).length, lessThanOrEqualTo(240));
+    expect(ascii.endsWith('.zip'), isTrue);
+
+    // Short names are untouched, including the extension-less case.
+    expect(safeFileName('说明文档.txt'), '说明文档.txt');
+    expect(safeFileName('photo.jpg'), 'photo.jpg');
+
+    // A trailing dot left behind by truncation would be rejected by NTFS.
+    expect(safeFileName('${'b' * 300}.').endsWith('.'), isFalse);
+    // An extension that would crowd out the base name is dropped instead.
+    expect(utf8.encode(safeFileName('x.${'e' * 400}')).length,
+        lessThanOrEqualTo(240));
+  });
 }
