@@ -132,4 +132,86 @@ void main() {
       },
     );
   }, skip: !Platform.isWindows);
+
+  // The POSIX counterpart: publishing must not copy the payload, and the saved
+  // file must keep working after the cache entry is deleted.
+  group('POSIX same-volume publication', () {
+    late Directory root, destination;
+    late File source;
+    late PlatformFileAccess files;
+
+    setUp(() async {
+      root = await Directory.systemTemp.createTemp('aster-posix-save-');
+      destination = await Directory(p.join(root.path, 'downloads')).create();
+      source = File(
+        p.join(destination.path, '.asterlink-cache', 'id', 'payload'),
+      );
+      await source.parent.create(recursive: true);
+      await source.writeAsBytes([1, 2, 3, 4]);
+      files = PlatformFileAccess(FakeNative(), destination, android: false);
+    });
+
+    tearDown(() async {
+      final resolved = await root.resolveSymbolicLinks();
+      expect(
+        p.isWithin(await Directory.systemTemp.resolveSymbolicLinks(), resolved),
+        isTrue,
+      );
+      expect(p.basename(resolved), startsWith('aster-posix-save-'));
+      await root.delete(recursive: true);
+    });
+
+    Future<String> save() => files.save(
+      id: 'id',
+      source: source,
+      name: '下载验证.bin',
+      relativePath: '',
+      checkpoint: () {},
+    );
+
+    test('The cache and the target resolve to the same device', () async {
+      final plan = await files.storagePlan(source.parent.path, destination.path);
+      expect(plan.copyOnSave, isFalse);
+      expect(plan.cache.id, plan.target.id);
+    });
+
+    // The plan reserves one copy only when the volume really links. That answer
+    // is measured, so the probe must leave nothing behind in the download
+    // folder the user just pointed at.
+    test('Detecting hard-link support leaves no residue', () async {
+      final plan = await files.storagePlan(source.parent.path, destination.path);
+      expect(plan.copyOnSave, isFalse);
+      expect(
+        await destination
+            .list(recursive: true)
+            .where((e) => p.basename(e.path).contains('.asterlink-linkprobe-'))
+            .toList(),
+        isEmpty,
+      );
+      expect(
+        await root
+            .list(recursive: true)
+            .where((e) => p.basename(e.path).contains('.asterlink-linkprobe-'))
+            .toList(),
+        isEmpty,
+      );
+    });
+
+    test('Publishing links instead of copying', () async {
+      final saved = await save();
+      expect(await FileSystemEntity.identical(source.path, saved), isTrue);
+      expect(await File(saved).readAsBytes(), [1, 2, 3, 4]);
+      await source.delete();
+      expect(await File(saved).readAsBytes(), [1, 2, 3, 4]);
+    });
+
+    test('Existing user files survive collisions', () async {
+      final existing = File(p.join(destination.path, '下载验证.bin'));
+      await existing.writeAsBytes([9, 8, 7]);
+      final saved = await save();
+      expect(p.basename(saved), '下载验证 (1).bin');
+      expect(await existing.readAsBytes(), [9, 8, 7]);
+      expect(await FileSystemEntity.identical(source.path, saved), isTrue);
+    });
+  }, skip: !Platform.isLinux);
 }

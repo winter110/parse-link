@@ -2088,6 +2088,7 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> _run(String id, _Run run) async {
     String? newSaved;
+    late DownloadSpec savedSpec;
     var committed = false;
     try {
       run.check();
@@ -2297,9 +2298,19 @@ class DownloadManager extends ChangeNotifier {
         );
         await _markCompleted(id, newSaved);
         committed = true;
-        await _afterCompleted(id, task.spec);
+        savedSpec = task.spec;
       } finally {
         _releasePost();
+      }
+      // Publication is durable at this point. Cleanup deletes the payload cache
+      // — a full-size file — and waits on playback releases, so it must not
+      // keep the single post turn: the next finished task would sit idle for
+      // ten-plus seconds before its own save started.
+      try {
+        await _afterCompleted(id, savedSpec);
+      } catch (_) {
+        // The file is already published; a failed cleanup must not be reported
+        // as a failed transfer.
       }
     } catch (e, stack) {
       if (!run.stopped && e is! _Stopped) {
