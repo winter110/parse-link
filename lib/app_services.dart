@@ -284,8 +284,14 @@ class AppServices extends ChangeNotifier {
       cacheDirectory,
     );
     transfer = transferHttp ?? TransferHttp();
+    // Only the platforms whose native code answers `foreground` on
+    // com.asterlink.app/native can keep transfers alive: Windows, macOS and
+    // Android. Linux has no such handler (its transfers run inside the
+    // asterlink_gopeed subprocess), and asking for one fails the very first
+    // task with "后台下载服务已中断，请返回应用继续".
     final backgroundTransfers =
-        platformFeatures && (Platform.isAndroid || isDesktopPlatform);
+        platformFeatures &&
+        (Platform.isAndroid || Platform.isWindows || Platform.isMacOS);
     lan =
         lanService ??
         LanService(
