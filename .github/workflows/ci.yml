@@ -5,6 +5,19 @@ name: CI
 # Commit directly to develop
 on:
   workflow_dispatch:
+    inputs:
+      release_channel:
+        # A pre-release is for testing: its tag carries the run number, so any
+        # number of runs can coexist. A formal release uses the plain version
+        # tag and claims "Latest", which is what /releases/latest serves and
+        # what the in-app fallback updater reads.
+        description: >-
+          prerelease 只留档（tag 为 ci-<版本>-<运行号>）；release 发正式版（tag 为 v<版本>，设为 Latest）
+        type: choice
+        options:
+          - prerelease
+          - release
+        default: prerelease
 permissions:
   contents: read
 concurrency:
@@ -419,12 +432,48 @@ jobs:
               print("::warning title=contents write is missing::this token only has read access, so creating the release will fail with HTTP 403. Set Settings then Actions then General then Workflow permissions to \"Read and write permissions\", or store a token with contents: write as the RELEASE_TOKEN secret. A re-run keeps the permissions of the original run, so start a new run afterwards.")
           '
       - name: Publish a new release
+        env:
+          # Dispatched from the UI the input is always set; a dispatch through
+          # the API may omit it, and then the safe default applies.
+          RELEASE_CHANNEL: ${{ inputs.release_channel || 'prerelease' }}
         run: |
           set -euo pipefail
           version="$(sed -n 's/^version: *//p' pubspec.yaml)"
-          tag="ci-${version//+/-}-${GITHUB_RUN_NUMBER}"
-          if [ "${GITHUB_RUN_ATTEMPT:-1}" -gt 1 ]; then
-            tag="${tag}-attempt-${GITHUB_RUN_ATTEMPT}"
+          run_link="[#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
+
+          if [ "$RELEASE_CHANNEL" = "release" ]; then
+            # A formal release must use the bare version tag: the in-app
+            # fallback updater reads /releases/latest, which never returns a
+            # pre-release, and its parser only accepts a tag shaped like
+            # v1.2.3+456 — "ci-2.3.0-230-7" is not a version at all.
+            tag="v${version}"
+            title="AsterLink ${version}"
+            # Reuse the CHANGELOG section written for this version; the trailer
+            # is appended so the release always says which run produced it.
+            changelog="$(python3 tool/package-release.py --notes || true)"
+            trailer="提交 ${GITHUB_SHA:0:7}，由 Actions 运行 ${run_link} 构建。"
+            if [ -n "$changelog" ]; then
+              notes="${changelog}"$'\n\n'"${trailer}"
+            else
+              notes="正式版 ${version}，${trailer}"
+            fi
+            channel_args=(--latest)
+          else
+            tag="ci-${version//+/-}-${GITHUB_RUN_NUMBER}"
+            if [ "${GITHUB_RUN_ATTEMPT:-1}" -gt 1 ]; then
+              tag="${tag}-attempt-${GITHUB_RUN_ATTEMPT}"
+            fi
+            title="构建 ${version}（运行 ${GITHUB_RUN_NUMBER}）"
+            notes="由手动触发的 Actions 运行 ${run_link} 生成，版本 ${version}，提交 ${GITHUB_SHA:0:7}。"
+            channel_args=(--prerelease)
+          fi
+
+          # One formal release per version. Saying so here keeps the failure
+          # readable, instead of letting it surface as "tag_name already
+          # exists" after the assets are staged.
+          if gh release view "$tag" --json tagName >/dev/null 2>&1; then
+            echo "::error title=release already exists::${tag} 已经存在。正式版一个版本号只发布一次，请先提升 pubspec.yaml 的版本号（dart tool/sync_version.dart --write）再开新的运行。"
+            exit 1
           fi
 
           python3 tool/package-release.py --checksums
@@ -434,12 +483,12 @@ jobs:
           # fails instead of replacing the assets of an earlier build.
           if ! gh release create "$tag" \
               --target "$GITHUB_SHA" \
-              --title "构建 ${version}（运行 ${GITHUB_RUN_NUMBER}）" \
-              --notes "由手动触发的 Actions 运行 [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}) 生成，版本 ${version}，提交 ${GITHUB_SHA:0:7}。" \
-              --prerelease \
+              --title "$title" \
+              --notes "$notes" \
+              "${channel_args[@]}" \
               .local/release-assets/*; then
-            echo '::error title=release not created::HTTP 403 "Resource not accessible by integration" means the token had read only contents, see the permission report above; "tag_name already exists" means an earlier run already published this tag, which is expected when a successful run is re-run.'
+            echo '::error title=release not created::HTTP 403 "Resource not accessible by integration" means the token had read only contents, see the permission report above; "tag_name already exists" means this tag was already published, which is expected when a successful pre-release run is re-run but never allowed for a formal release.'
             exit 1
           fi
 
-          echo "::notice::published release $tag with $(ls .local/release-assets | wc -l) assets"
+          echo "::notice::published ${RELEASE_CHANNEL} release $tag with $(ls .local/release-assets | wc -l) assets"

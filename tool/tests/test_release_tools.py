@@ -287,6 +287,18 @@ class ReleaseFilesTest(unittest.TestCase):
             release.stage(self.root, 'windows')
         self.assertFalse((self.root / '.local/release-assets/asterlink-1.2.3+4-windows-x64.zip').exists())
 
+    def test_notes_follow_the_version_section_of_the_changelog(self):
+        (self.root / 'CHANGELOG.md').write_text(
+            '# 更新记录\n\n## 1.3.0+5\n\n- newer section\n\n## 1.2.3+4\n\n【新增】Linux 版支持\n【修复】保存失败\n\n- 产物：deb\n\n## 1.2.0+3\n\n- old section\n',
+            encoding='utf-8')
+        self.assertEqual(release.release_notes(self.root),
+                         '【新增】Linux 版支持\n【修复】保存失败\n\n- 产物：deb')
+
+    def test_notes_are_empty_without_a_matching_section(self):
+        self.assertEqual(release.release_notes(self.root), '')
+        (self.root / 'CHANGELOG.md').write_text('# 更新记录\n\n## 1.2.3\n\n- other\n', encoding='utf-8')
+        self.assertEqual(release.release_notes(self.root), '')
+
     def test_invalid_architecture_is_rejected_before_staging(self):
         with self.assertRaises(ValueError):
             release.stage(self.root, 'windows', architecture='../other')

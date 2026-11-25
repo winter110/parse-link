@@ -82,6 +82,21 @@ def stage(root, platform, installer=None, architecture='x64'):
     return output
 
 
+def release_notes(root):
+    """Return the CHANGELOG section written for the project version, or ''."""
+    version = version_of(root)
+    try:
+        text = (root / 'CHANGELOG.md').read_text(encoding='utf-8')
+    except OSError:
+        return ''
+    heading = re.search(r'^##\s+' + re.escape(version) + r'\s*$', text, re.M)
+    if heading is None:
+        return ''
+    rest = text[heading.end():]
+    following = re.search(r'^##\s+', rest, re.M)
+    return rest[:following.start() if following else len(rest)].strip()
+
+
 def checksums(directory):
     directory = Path(directory)
     files = sorted(p for p in directory.iterdir()
@@ -105,6 +120,7 @@ if __name__ == '__main__':
     parser.add_argument('--installer')
     parser.add_argument('--architecture', choices=('x64', 'arm64'), default='x64')
     parser.add_argument('--checksums', action='store_true')
+    parser.add_argument('--notes', action='store_true', help='print the CHANGELOG section of the current version')
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     try:
@@ -113,7 +129,9 @@ if __name__ == '__main__':
             print('Release assets staged for ' + args.platform)
         if args.checksums:
             print('SHA-256 written for {} assets'.format(checksums(root / '.local/release-assets')))
-        if not args.platform and not args.checksums:
-            raise ValueError('Choose --platform or --checksums')
+        if args.notes:
+            print(release_notes(root))
+        if not args.platform and not args.checksums and not args.notes:
+            raise ValueError('Choose --platform, --checksums or --notes')
     except (ValueError, OSError) as error:
         parser.exit(1, str(error) + '\n')

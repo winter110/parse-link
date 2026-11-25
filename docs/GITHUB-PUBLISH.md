@@ -44,3 +44,25 @@ python tool/check_public_files.py --staged
 Secrets 中另设 `ASTERLINK_CONTROL_URL`、`UMENG_APPKEY`；Variables 中设置 `ASTERLINK_GITHUB_REPO`、`ASTERLINK_APPLICATION_ID` 和 `UMENG_CHANNEL`。正式版包名为 `com.asterlink.app`；正式配置不完整时工作流会停止，本机参数不会自动上传。
 
 修改 `pubspec.yaml` 后运行 `dart tool/sync_version.dart --write`。推送与完整版本一致的新标签，或在 Actions → Build signed release → Run workflow 选择分支，均可生成正式签名安装包。完成后下载 `release-android`、`release-windows`、`release-windows-arm64` 附件；工作流不会自动创建或发布 Release。需要发布时，再单独上传附件并发布版本。不要覆盖已发布标签。只有正式 Release 会被备用更新识别。
+
+## 发布渠道：预发布与正式版
+
+`ci.yml` 手动运行时有一个 `release_channel` 选项，决定这次运行发布什么：
+
+| 选项 | tag | 标记 | 用途 |
+| --- | --- | --- | --- |
+| `prerelease`（默认） | `ci-<版本>-<运行号>`，重跑再加 `-attempt-N` | Pre-release | 每次运行独立留档，互不覆盖 |
+| `release` | `v<版本>`，如 `v2.3.5+235` | Latest | 正式版，应用内备用更新能识别 |
+
+两条渠道都没有 `--clobber`。预发布靠运行号保证 tag 唯一；正式版一个版本号只允许发一次，同名 tag 已存在时任务会提前失败并提示先升版本号。
+
+应用内备用更新读的是 `GET /repos/<repo>/releases/latest`，该接口从不返回 pre-release，且 tag 必须能解析成 `v1.2.3+456` 形式。所以 `ci-*` 想改成正式版，**光取消 pre-release 勾选不够**，tag 也要改：
+
+```bash
+# 网页：Releases → 该记录 → Edit release → 取消 "Set as a pre-release"，勾选 "Set as the latest release"
+# 命令行等价操作（同时把 tag 改成正式版格式）
+gh release edit ci-2.3.5-235-7 --tag v2.3.5+235 --prerelease=false --latest
+```
+
+注意备用更新的仓库来自构建期 `ASTERLINK_GITHUB_REPO`（`config/build.community.json` 里为空，community 包因此不查询 GitHub），且只对 Android / Windows / macOS 生效，Linux 包不参与这条链路。
+
