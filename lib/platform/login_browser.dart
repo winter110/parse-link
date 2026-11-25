@@ -25,6 +25,13 @@ abstract class LoginCookieJar {
   });
 
   Future<void> deleteAllCookies();
+
+  /// The `flutter_inappwebview` manager behind this jar, or null when the
+  /// cookies live in a native context (Linux).
+  ///
+  /// Only the embedded backend can delete single cookies, which the Apple login
+  /// flow needs because it shares one WK store with search.
+  CookieManager? get embeddedManager => null;
 }
 
 class LoginCookie {
@@ -122,6 +129,9 @@ class EmbeddedCookieJar implements LoginCookieJar {
   final CookieManager manager;
 
   @override
+  CookieManager? get embeddedManager => manager;
+
+  @override
   Future<List<LoginCookie>> getCookies({
     required Uri url,
     LoginBrowserPage? view,
@@ -191,6 +201,9 @@ class DetachedLoginPage implements LoginBrowserPage {
 }
 
 class DetachedCookieJar implements LoginCookieJar {
+  @override
+  CookieManager? get embeddedManager => null;
+
   @override
   Future<List<LoginCookie>> getCookies({
     required Uri url,

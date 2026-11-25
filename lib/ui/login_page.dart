@@ -598,15 +598,24 @@ class _WebLoginPageState extends State<WebLoginPage>
     bool logFailure = true,
     bool requireSuccess = false,
   }) async {
-    final manager = cookies;
-    if (manager == null) return;
+    final jar = cookies;
+    if (jar == null) return;
     try {
       diagnostics.record(
         'cookie_cleanup_started',
         stage: 'cleanup',
         flush: _flushLogin,
       );
-      await forgetWebLoginCookies(manager, widget.target);
+      final embedded = jar.embeddedManager;
+      if (embedded != null) {
+        // Apple shares the WK default store with search, so its cleanup has to
+        // stay provider-scoped and delete cookie by cookie.
+        await forgetWebLoginCookies(embedded, widget.target);
+      } else {
+        // A detached jar owns a private WebKit context: nothing else lives in
+        // it, and emptying it is the only native operation available.
+        await jar.deleteAllCookies();
+      }
       diagnostics.record(
         'cookie_cleanup_completed',
         stage: 'cleanup',
